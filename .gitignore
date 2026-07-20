@@ -1,0 +1,32 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+server/.venv/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Runtime data
+artifacts/
+data/
+*.log
+
+# Browser state and captures must never be committed.
+playwright/.auth/
+browser-profile/
+
+# IDE
+.idea/
+.vscode/
