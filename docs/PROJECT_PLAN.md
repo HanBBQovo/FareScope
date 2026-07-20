@@ -235,3 +235,4 @@ A feature is complete only when all applicable items are satisfied:
 - Pushed commit `3243ab9` to `origin/main`; GitHub CI run `29714688524` completed successfully.
 - Upgraded official GitHub Actions to their current v7 releases after CI exposed Node 20 runtime deprecation warnings.
 - Pinned `setup-python` to its exact `v7.0.0` tag because that action did not publish the floating `v7` tag used by the other official actions.
+- Verified the corrected action versions in GitHub CI run `29714870571`; both server and web jobs passed without the Node 20 deprecation warning.
