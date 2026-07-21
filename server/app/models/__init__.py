@@ -3,6 +3,8 @@ from app.models.collection import (
     CollectionArtifact,
     CollectionRun,
     DailyPriceAggregate,
+    DailyTrendAggregate,
+    DailyTrendAggregateCoverage,
     FareOffer,
     Itinerary,
     LatestCalendarPriceSnapshot,
@@ -12,6 +14,7 @@ from app.models.collection import (
     SchemaObservation,
     Segment,
 )
+from app.models.exports import ExportJob, ExportJobCollectionRun
 from app.models.identity import AuditEvent, User, UserSession
 from app.models.notifications import (
     AlertEvent,
@@ -31,7 +34,11 @@ __all__ = [
     "CollectionArtifact",
     "CollectionRun",
     "DailyPriceAggregate",
+    "DailyTrendAggregate",
+    "DailyTrendAggregateCoverage",
     "FareOffer",
+    "ExportJob",
+    "ExportJobCollectionRun",
     "Itinerary",
     "LatestCalendarPriceSnapshot",
     "LatestPriceSnapshot",

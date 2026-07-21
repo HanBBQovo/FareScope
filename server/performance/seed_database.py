@@ -109,6 +109,11 @@ async def _seed(database_url: str, values: dict[str, int]) -> dict[str, object]:
                 UNION ALL
                 SELECT 'price observations', count(*) FROM price_observations
                 WHERE offer_fingerprint LIKE 'perf:%'
+                UNION ALL
+                SELECT 'daily trend aggregates', count(*) FROM daily_trend_aggregates
+                UNION ALL
+                SELECT 'daily trend coverage', count(*)
+                FROM daily_trend_aggregate_coverage
             ) AS counts
             ORDER BY relation
             """

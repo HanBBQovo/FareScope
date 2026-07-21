@@ -14,6 +14,7 @@ x-server-build: &server-build
 x-server-environment: &server-environment
   FARESCOPE_ENVIRONMENT: production
   FARESCOPE_SESSION_COOKIE_SECURE: "true"
+  FARESCOPE_PUBLIC_REGISTRATION_ENABLED: ${FARESCOPE_PUBLIC_REGISTRATION_ENABLED:-true}
   FARESCOPE_CORS_ORIGINS: '["${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN, e.g. https://farescope.example.com}"]'
   FARESCOPE_SECRET_ENCRYPTION_KEY: ${FARESCOPE_SECRET_ENCRYPTION_KEY:?set FARESCOPE_SECRET_ENCRYPTION_KEY}
   FARESCOPE_DATABASE_URL: ${FARESCOPE_DATABASE_URL:?set FARESCOPE_DATABASE_URL with the pgbouncer host}
@@ -43,6 +44,35 @@ x-server-environment: &server-environment
   FARESCOPE_COLLECTION_PARTITION_ARCHIVE_AFTER_MONTHS: ${FARESCOPE_COLLECTION_PARTITION_ARCHIVE_AFTER_MONTHS:-24}
   FARESCOPE_COLLECTION_PARTITION_PURGE_AFTER_MONTHS: ${FARESCOPE_COLLECTION_PARTITION_PURGE_AFTER_MONTHS:-}
   FARESCOPE_COLLECTION_PARTITION_MAX_ACTIONS: ${FARESCOPE_COLLECTION_PARTITION_MAX_ACTIONS:-2}
+  FARESCOPE_COLLECTION_REALTIME_STREAM_KEY: ${FARESCOPE_COLLECTION_REALTIME_STREAM_KEY:-farescope:realtime:collection-runs}
+  FARESCOPE_COLLECTION_REALTIME_STREAM_MAX_LENGTH: ${FARESCOPE_COLLECTION_REALTIME_STREAM_MAX_LENGTH:-20000}
+  FARESCOPE_COLLECTION_REALTIME_SNAPSHOT_LIMIT: ${FARESCOPE_COLLECTION_REALTIME_SNAPSHOT_LIMIT:-100}
+  FARESCOPE_COLLECTION_REALTIME_READ_COUNT: ${FARESCOPE_COLLECTION_REALTIME_READ_COUNT:-100}
+  FARESCOPE_COLLECTION_REALTIME_BLOCK_MS: ${FARESCOPE_COLLECTION_REALTIME_BLOCK_MS:-15000}
+  FARESCOPE_COLLECTION_REALTIME_CONNECTION_SECONDS: ${FARESCOPE_COLLECTION_REALTIME_CONNECTION_SECONDS:-300}
+  FARESCOPE_COLLECTION_REALTIME_REDIS_TIMEOUT_SECONDS: ${FARESCOPE_COLLECTION_REALTIME_REDIS_TIMEOUT_SECONDS:-2}
+  FARESCOPE_COLLECTION_REALTIME_RETRY_MS: ${FARESCOPE_COLLECTION_REALTIME_RETRY_MS:-2000}
+  FARESCOPE_EXPORT_DIRECTORY: /var/lib/farescope/exports
+  FARESCOPE_EXPORT_MAX_RANGE_DAYS: ${FARESCOPE_EXPORT_MAX_RANGE_DAYS:-366}
+  FARESCOPE_EXPORT_MAX_ROWS: ${FARESCOPE_EXPORT_MAX_ROWS:-250000}
+  FARESCOPE_EXPORT_MAX_FILE_BYTES: ${FARESCOPE_EXPORT_MAX_FILE_BYTES:-134217728}
+  FARESCOPE_EXPORT_PAGE_SIZE: ${FARESCOPE_EXPORT_PAGE_SIZE:-2000}
+  FARESCOPE_EXPORT_FILE_TTL_SECONDS: ${FARESCOPE_EXPORT_FILE_TTL_SECONDS:-604800}
+  FARESCOPE_EXPORT_LEASE_SECONDS: ${FARESCOPE_EXPORT_LEASE_SECONDS:-900}
+  FARESCOPE_EXPORT_MAX_ATTEMPTS: ${FARESCOPE_EXPORT_MAX_ATTEMPTS:-3}
+  FARESCOPE_EXPORT_RETRY_BASE_SECONDS: ${FARESCOPE_EXPORT_RETRY_BASE_SECONDS:-60}
+  FARESCOPE_EXPORT_DISPATCH_BATCH_SIZE: ${FARESCOPE_EXPORT_DISPATCH_BATCH_SIZE:-20}
+  FARESCOPE_EXPORT_DISPATCH_LEASE_SECONDS: ${FARESCOPE_EXPORT_DISPATCH_LEASE_SECONDS:-300}
+  FARESCOPE_EXPORT_PENDING_TIMEOUT_SECONDS: ${FARESCOPE_EXPORT_PENDING_TIMEOUT_SECONDS:-86400}
+  FARESCOPE_EXPORT_MAX_ACTIVE_JOBS: ${FARESCOPE_EXPORT_MAX_ACTIVE_JOBS:-5}
+  FARESCOPE_EXPORT_GLOBAL_MAX_ACTIVE_JOBS: ${FARESCOPE_EXPORT_GLOBAL_MAX_ACTIVE_JOBS:-100}
+  FARESCOPE_EXPORT_MANIFEST_MAX_RUNS: ${FARESCOPE_EXPORT_MANIFEST_MAX_RUNS:-20000}
+  FARESCOPE_EXPORT_USER_MAX_RETAINED_FILES: ${FARESCOPE_EXPORT_USER_MAX_RETAINED_FILES:-20}
+  FARESCOPE_EXPORT_USER_MAX_RETAINED_BYTES: ${FARESCOPE_EXPORT_USER_MAX_RETAINED_BYTES:-1073741824}
+  FARESCOPE_EXPORT_MIN_FREE_BYTES: ${FARESCOPE_EXPORT_MIN_FREE_BYTES:-2147483648}
+  FARESCOPE_EXPORT_MIN_FREE_RATIO: ${FARESCOPE_EXPORT_MIN_FREE_RATIO:-0.1}
+  FARESCOPE_EXPORT_ORPHAN_GRACE_SECONDS: ${FARESCOPE_EXPORT_ORPHAN_GRACE_SECONDS:-86400}
+  FARESCOPE_EXPORT_ORPHAN_CLEANUP_BATCH_SIZE: ${FARESCOPE_EXPORT_ORPHAN_CLEANUP_BATCH_SIZE:-100}
 
 x-server-security: &server-security
   init: true
@@ -203,6 +233,8 @@ services:
       - --workers=${FARESCOPE_API_WORKERS:-2}
       - --proxy-headers
       - --forwarded-allow-ips=*
+    volumes:
+      - export-files:/var/lib/farescope/exports
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -243,6 +275,8 @@ services:
       - --queues=default,analysis,notifications
       - --concurrency=${FARESCOPE_WORKER_CONCURRENCY:-4}
       - --max-tasks-per-child=1000
+    volumes:
+      - export-files:/var/lib/farescope/exports
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -258,6 +292,48 @@ services:
       start_period: 20s
     networks:
       - egress
+      - backend
+    stop_grace_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  export-worker:
+    image: ${FARESCOPE_SERVER_IMAGE:-farescope-server:local}
+    build: *server-build
+    restart: unless-stopped
+    <<: *server-security
+    environment:
+      <<: *server-environment
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --hostname=export-worker@%h
+      - --queues=exports
+      - --concurrency=${FARESCOPE_EXPORT_WORKER_CONCURRENCY:-2}
+      - --max-tasks-per-child=200
+    volumes:
+      - export-files:/var/lib/farescope/exports
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app:celery_app inspect ping --destination=export-worker@$${HOSTNAME} --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
       - backend
     stop_grace_period: 60s
     logging: *default-logging
@@ -392,6 +468,8 @@ volumes:
     name: farescope-production-celerybeat
   collector-artifacts:
     name: farescope-production-collector-artifacts
+  export-files:
+    name: farescope-production-export-files
 
 networks:
   edge:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import text
@@ -45,6 +45,26 @@ async def test_partition_archive_is_non_destructive_and_purge_is_explicit() -> N
             ]
             assert await _relation_exists(connection, f"public.{partition_name}") is False
             assert await _relation_exists(connection, f"farescope_archive.{partition_name}") is True
+
+            protected_actions = await maintain_observation_partition_lifecycle(
+                connection,
+                reference=date(2026, 7, 21),
+                archive_after_months=24,
+                purge_after_months=84,
+                max_actions=1,
+                protected_export_ranges=(
+                    (
+                        datetime(2010, 1, 15, tzinfo=UTC),
+                        datetime(2010, 2, 1, tzinfo=UTC),
+                    ),
+                ),
+            )
+
+            assert protected_actions == ()
+            assert await _relation_exists(
+                connection,
+                f"farescope_archive.{partition_name}",
+            ) is True
 
             purge_actions = await maintain_observation_partition_lifecycle(
                 connection,

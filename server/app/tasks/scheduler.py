@@ -9,18 +9,20 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.advisory_locks import try_acquire_observation_partition_exclusive_lock
 from app.db.partitions import (
     ensure_all_observation_partitions,
     maintain_observation_partition_lifecycle,
 )
 from app.db.session import create_engine, create_session_factory
 from app.services.collection_dispatch import Publisher, publish_dispatch_leases_safely
+from app.services.collection_realtime import publish_collection_run_states_safely
 from app.services.collection_scheduler import plan_scheduler_tick
+from app.services.export_jobs import list_active_export_ranges
 from app.settings import Settings, get_settings
 from app.tasks.celery_app import celery_app
 
 _SCHEDULER_LOCK_ID = 6_323_717_466_347_023_757
-_PARTITION_LOCK_ID = 6_323_717_466_347_023_758
 
 
 async def run_scheduler_tick(
@@ -63,10 +65,16 @@ async def run_scheduler_tick(
                 schedule_bucket_seconds=runtime_settings.collection_schedule_bucket_seconds,
             )
 
+        await publish_collection_run_states_safely(
+            session_factory,
+            run_ids=plan.state_changed_run_ids,
+            settings=runtime_settings,
+        )
         publish_results = await publish_dispatch_leases_safely(
             session_factory,
             plan.dispatch_leases,
             publisher=publisher,
+            realtime_settings=runtime_settings,
         )
         return {
             "status": "ok",
@@ -110,19 +118,21 @@ async def maintain_observation_partitions(
 
     try:
         async with session_factory() as session, session.begin():
-            if not await _try_transaction_lock(session, _PARTITION_LOCK_ID):
+            if not await try_acquire_observation_partition_exclusive_lock(session):
                 return {"status": "skipped", "reason": "partition_lock_busy"}
             connection = await session.connection()
             partitions = await ensure_all_observation_partitions(
                 connection,
                 reference=current_time,
             )
+            protected_export_ranges = await list_active_export_ranges(session)
             lifecycle_actions = await maintain_observation_partition_lifecycle(
                 connection,
                 reference=current_time,
                 archive_after_months=(runtime_settings.collection_partition_archive_after_months),
                 purge_after_months=(runtime_settings.collection_partition_purge_after_months),
                 max_actions=runtime_settings.collection_partition_max_actions,
+                protected_export_ranges=protected_export_ranges,
             )
         return {
             "status": "ok",

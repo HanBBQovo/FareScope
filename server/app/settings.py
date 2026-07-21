@@ -81,6 +81,48 @@ class Settings(BaseSettings):
         le=2400,
     )
     collection_partition_max_actions: int = Field(default=2, ge=1, le=24)
+    collection_realtime_stream_key: str = Field(
+        default="farescope:realtime:collection-runs",
+        min_length=1,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9:_-]+$",
+    )
+    collection_realtime_stream_max_length: int = Field(default=20_000, ge=1_000, le=1_000_000)
+    collection_realtime_snapshot_limit: int = Field(default=100, ge=1, le=500)
+    collection_realtime_read_count: int = Field(default=100, ge=1, le=500)
+    collection_realtime_block_ms: int = Field(default=15_000, ge=1_000, le=30_000)
+    collection_realtime_connection_seconds: int = Field(default=300, ge=30, le=3_600)
+    collection_realtime_redis_timeout_seconds: float = Field(default=2.0, ge=0.1, le=30)
+    collection_realtime_retry_ms: int = Field(default=2_000, ge=500, le=60_000)
+    export_directory: str = "/var/lib/farescope/exports"
+    export_max_range_days: int = Field(default=366, ge=1, le=3660)
+    export_max_rows: int = Field(default=250_000, ge=1_000, le=2_000_000)
+    export_max_file_bytes: int = Field(default=134_217_728, ge=1_048_576, le=1_073_741_824)
+    export_page_size: int = Field(default=2_000, ge=100, le=10_000)
+    export_file_ttl_seconds: int = Field(default=604_800, ge=3600, le=31_536_000)
+    export_lease_seconds: int = Field(default=900, ge=60, le=7200)
+    export_max_attempts: int = Field(default=3, ge=1, le=10)
+    export_retry_base_seconds: int = Field(default=60, ge=5, le=3600)
+    export_dispatch_batch_size: int = Field(default=20, ge=1, le=100)
+    export_dispatch_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    export_pending_timeout_seconds: int = Field(default=86_400, ge=3600, le=604_800)
+    export_max_active_jobs: int = Field(default=5, ge=1, le=50)
+    export_global_max_active_jobs: int = Field(default=100, ge=1, le=100_000)
+    export_manifest_max_runs: int = Field(default=20_000, ge=1000, le=1_000_000)
+    export_user_max_retained_files: int = Field(default=20, ge=1, le=1000)
+    export_user_max_retained_bytes: int = Field(
+        default=1_073_741_824,
+        ge=1_048_576,
+        le=109_951_162_777_600,
+    )
+    export_min_free_bytes: int = Field(
+        default=2_147_483_648,
+        ge=0,
+        le=109_951_162_777_600,
+    )
+    export_min_free_ratio: float = Field(default=0.1, ge=0, le=0.9)
+    export_orphan_grace_seconds: int = Field(default=86_400, ge=300, le=2_592_000)
+    export_orphan_cleanup_batch_size: int = Field(default=100, ge=1, le=10_000)
 
     @field_validator("collector_browser_channel", mode="before")
     @classmethod
@@ -115,6 +157,16 @@ class Settings(BaseSettings):
             raise ValueError("a secret encryption key is required in production")
         if self.environment == "production" and self.collection_coordination_backend != "redis":
             raise ValueError("Redis collection coordination is required in production")
+        if self.export_user_max_retained_bytes < self.export_max_file_bytes:
+            raise ValueError("per-user export storage must allow at least one maximum-size file")
+        if self.export_user_max_retained_files < self.export_max_active_jobs:
+            raise ValueError(
+                "per-user retained export files must cover all active export jobs"
+            )
+        if self.export_pending_timeout_seconds <= self.export_dispatch_lease_seconds:
+            raise ValueError("export pending timeout must exceed the dispatch lease")
+        if self.export_orphan_grace_seconds < self.export_lease_seconds * 2:
+            raise ValueError("export orphan grace must be at least twice the export lease")
         if (
             self.collection_coordination_backend == "redis"
             and self.collection_coordination_acquire_timeout_seconds

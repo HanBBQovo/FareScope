@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import random
 import socket
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -41,10 +43,13 @@ from app.services.collection_persistence import (
     persist_collection_payloads,
     record_collection_failure,
 )
+from app.services.collection_realtime import publish_collection_run_state_safely
 from app.settings import Settings, get_settings
 from app.tasks.celery_app import celery_app
 
 _EXPECTED_CAPTURES = frozenset({"calendar", "batch_search"})
+CollectionStatePublisher = Callable[[UUID], Awaitable[object]]
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=32)
@@ -78,9 +83,7 @@ def _configured_collection_rate_gate(settings: Settings) -> CollectionRateGate:
             settings.redis_url,
             policy,
             lease_ttl_seconds=settings.collection_coordination_lease_ttl_seconds,
-            acquire_timeout_seconds=(
-                settings.collection_coordination_acquire_timeout_seconds
-            ),
+            acquire_timeout_seconds=(settings.collection_coordination_acquire_timeout_seconds),
             poll_interval_seconds=settings.collection_coordination_poll_interval_seconds,
             command_timeout_seconds=settings.collection_coordination_redis_timeout_seconds,
             key_prefix=settings.collection_coordination_key_prefix,
@@ -121,6 +124,7 @@ async def run_collection_once(
     rate_gate: CollectionRateGate | None = None,
     worker_id: str | None = None,
     dispatch_token: str | None = None,
+    state_publisher: CollectionStatePublisher | None = None,
 ) -> dict[str, Any]:
     """Claim, collect, and persist one run without holding a DB transaction during I/O."""
 
@@ -144,6 +148,14 @@ async def run_collection_once(
     lease_owner = (worker_id or os.getenv("FARESCOPE_WORKER_ID") or socket.gethostname())[:160]
     worker_lease_owner = f"worker:{lease_owner}"[:160]
 
+    async def publish_committed_state(target_run_id: UUID) -> None:
+        await _publish_committed_collection_state(
+            session_factory,
+            run_id=target_run_id,
+            settings=runtime_settings,
+            publisher=state_publisher,
+        )
+
     try:
         retry_at: datetime | None = None
         try:
@@ -156,6 +168,7 @@ async def run_collection_once(
                     lease_seconds=runtime_settings.collection_run_lease_seconds,
                     browser_channel=runtime_settings.collector_browser_channel,
                 )
+            await publish_committed_state(run_id)
         except CollectionRunUnavailableError as exc:
             return {
                 "run_id": str(run_id),
@@ -171,6 +184,7 @@ async def run_collection_once(
                 code="collection_claim_error",
                 message="Collection run could not be claimed",
                 exception=exc,
+                state_publisher=publish_committed_state,
             )
             return {
                 "run_id": str(run_id),
@@ -222,6 +236,7 @@ async def run_collection_once(
                 error=exc,
                 expected_lease_owner=worker_lease_owner,
                 settings=runtime_settings,
+                state_publisher=publish_committed_state,
             )
         except Exception as exc:  # noqa: BLE001 - runtime/config exceptions need durable state
             await _record_unhandled_failure(
@@ -231,6 +246,7 @@ async def run_collection_once(
                 message="Collector runtime raised an exception",
                 exception=exc,
                 expected_lease_owner=worker_lease_owner,
+                state_publisher=publish_committed_state,
             )
             return {
                 "run_id": str(run_id),
@@ -265,6 +281,7 @@ async def run_collection_once(
                         maximum_seconds=runtime_settings.collection_retry_max_seconds,
                         jitter_ratio=runtime_settings.collection_retry_jitter_ratio,
                     )
+                await publish_committed_state(run_id)
             except CollectionRunUnavailableError as exc:
                 return {
                     "run_id": str(run_id),
@@ -367,6 +384,7 @@ async def run_collection_once(
                         finished_at=browser_result.finished_at,
                     )
                     final_status = CollectionStatus.SUCCEEDED.value
+            await publish_committed_state(run_id)
         except CollectionRunUnavailableError as exc:
             return {
                 "run_id": str(run_id),
@@ -381,6 +399,7 @@ async def run_collection_once(
                 message="Collection payload persistence failed",
                 exception=exc,
                 expected_lease_owner=worker_lease_owner,
+                state_publisher=publish_committed_state,
             )
             return {
                 "run_id": str(run_id),
@@ -442,10 +461,7 @@ async def _claim_collection_run(
         CollectionStatus.CANCELED.value,
     }:
         raise CollectionRunUnavailableError(f"collection run is already {run.status}")
-    if (
-        run.status == CollectionStatus.PENDING.value
-        and run.scheduled_at > now
-    ):
+    if run.status == CollectionStatus.PENDING.value and run.scheduled_at > now:
         raise CollectionRunUnavailableError("collection run is scheduled for a future retry")
     active_lease = run.lease_expires_at is not None and run.lease_expires_at > now
     if run.status == CollectionStatus.RUNNING.value and active_lease:
@@ -543,7 +559,9 @@ async def _record_unhandled_failure(
     message: str,
     exception: Exception,
     expected_lease_owner: str | None = None,
+    state_publisher: CollectionStatePublisher | None = None,
 ) -> None:
+    recorded = False
     try:
         async with session_factory() as session, session.begin():
             run = await _load_run_for_update(session, run_id)
@@ -565,8 +583,11 @@ async def _record_unhandled_failure(
                     },
                 ),
             )
+        recorded = True
     except Exception:  # noqa: BLE001 - original failure must remain the task outcome
         return
+    if recorded and state_publisher is not None:
+        await state_publisher(run_id)
 
 
 async def _record_coordination_failure(
@@ -576,6 +597,7 @@ async def _record_coordination_failure(
     error: CollectionCoordinationError,
     expected_lease_owner: str,
     settings: Settings,
+    state_publisher: CollectionStatePublisher | None = None,
 ) -> dict[str, Any]:
     failed_at = datetime.now(UTC)
     retry_at: datetime | None = None
@@ -608,6 +630,8 @@ async def _record_coordination_failure(
                 maximum_seconds=settings.collection_retry_max_seconds,
                 jitter_ratio=settings.collection_retry_jitter_ratio,
             )
+        if state_publisher is not None:
+            await state_publisher(run_id)
     except CollectionRunUnavailableError as exc:
         return {
             "run_id": str(run_id),
@@ -622,6 +646,7 @@ async def _record_coordination_failure(
             message="Collection coordination failure could not be recorded",
             exception=exc,
             expected_lease_owner=expected_lease_owner,
+            state_publisher=state_publisher,
         )
         return {
             "run_id": str(run_id),
@@ -640,6 +665,31 @@ async def _record_coordination_failure(
         "retryable": True,
         "retry_scheduled_at": retry_at.isoformat() if retry_at is not None else None,
     }
+
+
+async def _publish_committed_collection_state(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    run_id: UUID,
+    settings: Settings,
+    publisher: CollectionStatePublisher | None,
+) -> None:
+    try:
+        if publisher is not None:
+            await publisher(run_id)
+            return
+        await publish_collection_run_state_safely(
+            session_factory,
+            run_id=run_id,
+            settings=settings,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - state is already committed
+        logger.warning(
+            "collection realtime callback failed",
+            extra={"run_id": str(run_id), "error_type": type(exc).__name__},
+        )
 
 
 async def _load_run_for_update(session: AsyncSession, run_id: UUID) -> CollectionRun:

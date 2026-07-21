@@ -100,9 +100,11 @@ FareScope is a modular monolith with isolated runtime processes:
 - `collector`: dedicated headed Google Chrome/Xvfb Celery worker and provider adapters.
 - `analysis`: collection-result aggregation and alert evaluation queue.
 - `notification`: durable delivery claims, network sends, retry, and audit queue.
+- `export`: isolated CSV/JSON generation queue with durable jobs, bounded files, and archived-price
+  reads. It does not share worker concurrency with alert analysis or notification delivery.
 - PostgreSQL 16: source of truth, monthly range partitions, latest snapshots, and aggregates.
-- Redis: Celery broker/result state plus cross-process/host collection coordination; never the only
-  copy of business data.
+- Redis: Celery broker/result state, cross-process/host collection coordination, and best-effort
+  collection-state stream hints; never the only copy of business data.
 - PgBouncer: production transaction-pooling boundary.
 
 Provider adapters and browser dependencies are isolated from the API package boundary. Browser or
@@ -141,9 +143,12 @@ available only for development and isolated tests.
   `subscription_filters`.
 - Collection: `collection_runs`, `collection_artifacts`, `schema_observations`.
 - Fares: `itineraries`, `segments`, `fare_offers`, partitioned `price_observations`, latest price
-  snapshots, partitioned calendar observations, latest calendar snapshots, daily aggregates.
+  snapshots, partitioned calendar observations, latest calendar snapshots, exact maintained daily
+  trend aggregates, and explicit aggregate coverage rows.
 - Alerts: `alert_rules`, rule-channel links, `alert_events`, `notification_channels`, and
   `notification_deliveries`, including per-channel time zone, quiet hours, and allowed weekdays.
+- Reporting: owner-scoped `export_jobs` plus temporary per-job successful-collection manifests that
+  freeze each export's visible data set without holding a database connection while writing files.
 
 Money uses integer minor units plus currency. Timestamps use UTC. Provider-local timestamps retain
 their time-zone context. A notification target price is separate from a result maximum-price
@@ -167,6 +172,11 @@ filter; a target must never hide the current price it is meant to monitor.
 - Collection operations page with health, pagination, attempts, calendar/itinerary/offer counts,
   upstream status, errors, explicit calendar-only warnings, queue depths, user-scoped run states,
   schema fingerprints, safe top-level field summaries, and diagnostic detail.
+- Authenticated collection-state SSE for saved subscriptions and operations, with PostgreSQL owner
+  rechecks, Redis degradation handling, and bounded polling fallback. Unsaved explorer searches
+  continue to poll because they do not yet have a persisted owner subscription.
+- Owner-scoped background CSV/JSON exports from the price-history page, including archived
+  observations, stable data-set snapshots, progress, download expiry, and deletion.
 - Loading, empty, error, stale, unavailable, and responsive layouts. Demo fare fallback is removed.
 
 The production bundle uses explicit vendor chunks. The main entry fell from about 533 kB to about
@@ -187,16 +197,16 @@ Three warm local runs measured:
 - 12-route dashboard latest: 1.465-2.404 ms; trend: 7.965-9.511 ms;
 - collection health: 0.263-0.369 ms; run page: about 0.199 ms.
 
-At the hard 100-route dashboard limit, latest and trend application requests measured about 109 ms
-and 127 ms. This is within the current local target but scales linearly, so the limit must not be
-raised without a snapshot/aggregate redesign. A subsequent set-based implementation removed the
-per-route SQL union and repeated planning overhead. With the same 8+4 connection pool, 32 concurrent
-dashboard API requests completed with 0/80 errors instead of 4/80 timeouts; p95 fell from 2,691 ms
-to 1,655 ms and throughput rose from 15.5 to 23.4 requests/second. Pool-wait p95 remained about
-784 ms at that intentionally saturated level, so this is improved evidence rather than a claim that
-high-concurrency capacity work is finished. The 14.4-million-observation large profile, cold-cache
-behavior, and production hardware remain unverified. See `docs/PERFORMANCE.md` for the full contract
-and reproduction commands.
+At the hard 100-route dashboard limit, a set-based implementation removed per-route SQL unions and
+repeated planning overhead. The subsequent maintained daily trend path preserves exact run minima,
+uses explicit empty-day coverage, and falls back to raw rows whenever a filter or coverage range is
+not compatible. Its strict verifier found zero differences at both 480,000 and 1.44 million price
+observations: 87,000 aggregate rows and 180,000 query-day coverage rows matched at each scale. Warm
+100-route execution fell from 24.637 to 13.992 ms at reference scale and from 62.713 to 28.513 ms at
+1.44 million rows. Explicit aggregate/raw c32 runs remain noisy on the shared laptop, so the exact
+verifier and query plans are acceptance evidence rather than a production capacity claim. The
+14.4-million-observation profile, true cold-cache behavior, and production hardware remain
+unverified. See `docs/PERFORMANCE.md` for the full contract and reproduction commands.
 
 ## Roadmap
 
@@ -222,10 +232,12 @@ and reproduction commands.
 ### M2: Persistence and price APIs
 
 - [x] Canonical query deduplication, monthly partitions, latest snapshots, and migrations through
-  `20260720_0012`.
+  `20260721_0014`.
 - [x] Calendar, itinerary, segment, offer, raw history, aggregate history, and collection health.
 - [x] Owner-scoped keyset pagination and bounded hot queries.
 - [x] Independent result filters and notification target prices.
+- [x] Exact maintained Dashboard daily trends with coverage-gated raw fallback, archive-safe
+  maintenance refusal, crash-resumable checkpoints, and 480,000/1.44-million-row equivalence.
 - [x] Reference-scale data generator, service-SQL profiler, and saved performance contract.
 - [x] Automated two-stage partition lifecycle: 24-month hot default, non-destructive archive schema,
   bounded maintenance actions, and explicitly opt-in purge after a longer horizon.
@@ -247,7 +259,8 @@ and reproduction commands.
 - [x] Cursor pagination, collection polling, real empty/error/stale states, and vendor chunking.
 - [ ] Screenshot-level desktop/mobile visual verification when a browser-control session is
   available.
-- [ ] Replace polling with optional SSE for faster collection-state updates.
+- [x] Optional owner-scoped SSE for persisted collection-state updates with Redis failure fallback;
+  unsaved explorer searches retain bounded polling.
 - [ ] Add saved cross-route comparison views.
 
 ### M5: Alerts, reporting, and operations
@@ -260,7 +273,9 @@ and reproduction commands.
 - [x] Quiet hours and per-channel delivery schedules with IANA time zones, weekdays, cross-midnight,
   and DST behavior.
 - [ ] Optional email delivery after an SMTP backend is configured; email remains unrelated to login.
-- [ ] Background CSV/JSON exports and archived-data access/restore workflow.
+- [x] Owner-scoped background CSV/JSON exports with stable snapshots, quotas, expiry, and direct
+  archived-partition reads.
+- [ ] Archived-data restore workflow; exports inspect retained archive rows but are not backups.
 - [x] Schema-drift detail UI and queue-depth metrics without exposing provider payload values.
 - [ ] Automated backup/restore drill.
 
@@ -335,8 +350,25 @@ A feature is complete only when all applicable items are true:
   a documented capacity limit.
 - Added reproducible service/ASGI concurrency tooling with exact confirmation and
   `farescope_perf_` database-name safety gates on both Python and `psql` seed paths.
-- Aligned the Vite development proxy default with the documented local API port and verified the
-  active 5278 proxy against the current 8010 development API.
+- Added maintained UTC-day Dashboard trends with exact run-minimum semantics, coverage-gated raw
+  fallback, archive-safe maintenance refusal, atomic checkpoint resume, and explicit aggregate/raw
+  benchmark modes. Strict 480,000- and 1.44-million-row verification reported zero differences.
+- Added owner-scoped collection SSE backed by PostgreSQL truth and Redis Stream hints, including
+  session/ownership rechecks, cursor checkpoints, identity-cache clearing, and polling fallback.
+- Added durable owner-scoped CSV/JSON export jobs with a frozen successful-run manifest, hot/archive
+  keyset reads, isolated worker capacity, per-user and global storage bounds, dispatch/worker leases,
+  crash cleanup, expiring downloads, and two-phase deletion.
+- Kept the documented Vite/API default on port 8000 and verified the active 5278 development proxy
+  against the separately configured 8010 API instance.
+- Hardened historical exports so their frozen successful-run manifest must resolve to retained hot
+  or archived source months. A purged source returns 422 without leaving a job, while ranges with
+  no successful runs still produce a valid empty export.
+- Added real two-transaction PostgreSQL coverage for shared trend/export partition locks versus
+  lifecycle's exclusive lock.
+- Ran a live local flow with password `1234`: registration, a direct round-trip `SHA-TYO`
+  subscription, SSE snapshot, background JSON export, download, deletion, and logout all
+  completed successfully. The export correctly contained zero detailed observations because the
+  retained live route evidence is calendar-only.
 - Passed full ordinary and PostgreSQL-backed test suites, Ruff, Alembic head/check, frontend lint
   and build, local/production Compose parsing, and live API workflow checks without building Docker
   images.

@@ -21,9 +21,12 @@ Current status:
   at the process boundary in the architecture contract.
 - `verified locally`: the repeatable reference concurrency workload, set-based 100-route dashboard
   reads, and zero-error completion across all 1,120 reference service/API requests.
+- `verified locally`: maintained exact UTC-day Dashboard aggregates, bounded/resumable backfill,
+  incomplete-coverage fallback, and raw-versus-aggregate equivalence at 480,000 and 1.44 million
+  observations.
 - `needs scale verification`: latency SLOs, connection budgets, index-only behavior, cache hit
-  ratios, autovacuum settings, true cold-cache behavior, and the large profile query plans.
-- `history dependent`: long-range trend aggregation and retention-cost estimates.
+  ratios, autovacuum settings, true cold-cache behavior, and the 14.4-million-row profile.
+- `history dependent`: production price distributions and long-term aggregate retention costs.
 - `blocked`: production hardware sizing and a representative server network environment.
 
 ### Local fare-query proof (2026-07-20)
@@ -132,8 +135,113 @@ million large profile. At c32 the API completed 80/80 dashboard requests with p9
 2,365 ms, but the direct service layer had one 2-second pool timeout. Its dashboard trend alone
 executed in 125 ms and touched 122,476 shared buffers. This is the remaining growth boundary: the
 set-based change removes branch-planning collapse, but raw trend work still scales with observation
-volume. Before claiming large-profile readiness, move the dashboard trend to a maintained bounded
-aggregate/read model and rerun the 14.4-million-row profile on production-like dedicated hardware.
+volume. The maintained model below addresses the compatible-filter portion of that boundary; the
+14.4-million-row profile still requires production-like dedicated hardware.
+
+### Maintained daily Dashboard trends (2026-07-21)
+
+Revision `20260721_0013` implements the bounded aggregate/read model identified above. It adds
+`daily_trend_aggregates` and a separate `daily_trend_aggregate_coverage` watermark. The migration
+only creates schema and indexes; it deliberately does not scan observation partitions while DDL is
+running.
+
+Each aggregate is keyed by canonical search, UTC observation date, currency, and direct-only mode.
+It summarizes the exact per-collection-run minimum using integer minor units and retains minimum,
+maximum, sum, sample count, and first/last observation timestamps. This permits an exact weighted
+average across days. `daily_price_aggregates.service_date` is a travel date and is intentionally not
+reused for an observation-time trend.
+
+The Dashboard uses this path only when no airline, origin/destination airport, maximum price,
+maximum stops, maximum duration, or departure-time filter is active. Direct-only is an explicit
+aggregate dimension. All detail-filtered contexts preserve the original bounded observation and
+itinerary path. For compatible contexts, every complete UTC day in the requested range must have a
+coverage row, including days with no observations. Complete ranges use daily rows plus exact raw
+partial-day boundaries; any missing coverage makes that context fall back to the complete raw
+range. The current/previous 24-hour comparison always uses the last 48 hours of raw observations.
+Consequently an interrupted backfill can cost more, but it cannot silently omit prices.
+
+Successful collection persistence rebuilds the affected canonical query/day in the same database
+transaction. Transaction advisory locks are acquired in deterministic date/query order, and the
+operation deletes and reconstructs exact rows, so collection retries, corrected rows, and
+maintenance reruns cannot additively drift. Maintenance also takes the observation-partition
+shared lock and proves that every requested month is still attached to
+`public.price_observations` before changing any aggregate. A detached archive overlap, or a month
+that is neither attached nor archived, produces `blocked_source_unavailable` and preserves all
+existing aggregate and coverage rows. It never interprets unavailable source data as an empty day.
+
+The crash-safe default rebuilds 30 days, which fits the bootstrap previous/current-month hot
+partition window, in 500-key transactions. Each committed batch is printed immediately as one JSON
+line. `--checkpoint-file` atomically replaces a versioned cursor after commit and automatically
+resumes it on the next invocation:
+
+```bash
+uv run python -m app.maintenance.daily_trends \
+  --checkpoint-file var/daily-trends-30d.json
+```
+
+If the process commits and crashes before replacing the file, the prior cursor causes at most one
+idempotent batch replay; it cannot skip a batch. The checkpoint is bound to start date, end date,
+and optional search query, so a stale file from another scope is rejected. Operators capturing the
+JSONL stream without a checkpoint may resume manually with both cursor fields:
+
+```bash
+uv run python -m app.maintenance.daily_trends \
+  --days 30 \
+  --batch-size 500 \
+  --max-batches 200 \
+  --after-date 2026-07-01 \
+  --after-search-query-id 00000000-0000-0000-0000-000000000000
+```
+
+Ranges longer than 30 days are explicit historical operations. Every overlapping monthly source
+partition must first be restored or remain attached; archived or purged months are rejected rather
+than silently truncated. A PostgreSQL detached-partition test verifies that an existing historical
+aggregate and its non-NULL source watermark remain unchanged after the refusal.
+
+The disposable reference and 3x databases were rebuilt for 2,000 searches over 90 dates. Each
+created 180,000 coverage rows, including empty dates, and 87,000 non-empty aggregate rows from
+44,000 source query-days. The strict verifier now constructs the complete 2,000-by-90 expected
+calendar: both databases report `expected_coverage=actual_coverage=180000`, zero missing or extra
+rows, exact NULL empty-day watermarks, and zero aggregate differences. A PostgreSQL fixture
+also verifies incomplete fallback, complete coverage, all current filter categories, partial UTC
+boundaries, and a repeated idempotent rebuild.
+
+Candidate discovery no longer rescans the full observation range for every page. It reads distinct
+canonical queries from the subscription catalog, then keyset-pages query/date pairs. With the
+default 500-key page, warm plans were stable across raw scale:
+
+| Candidate operation | 480,000 observations | 1.44 million observations |
+| --- | ---: | ---: |
+| Subscription discovery | 1.152 ms / 133 hits | 0.846 ms / 133 hits |
+| 500-key query/day page | 17.215 ms / 133 hits | 17.113 ms / 133 hits |
+| Removed raw discovery | 27.405 ms / 8,921 reads | 76.912 ms / 27,608 reads |
+
+An actual 30-day rebuild of 60,000 query-days used 121 commits, wrote 87,000 aggregate rows, and
+took 10.3 seconds at reference scale and 11.6 seconds at 3x. Restarting the completed checkpoint
+returned the summary in 0.4 seconds without database maintenance work.
+
+Warm 100-route plans improved as follows. The fixture contains 91 aggregate-compatible contexts;
+the remaining detail-filtered contexts intentionally dominate the residual raw work.
+
+| Dataset | Raw execution | Maintained execution | Change | Planning before/after | Shared hits before/after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 480,000 observations | 24.637 ms | 13.992 ms | -43.2% | 1.499 / 4.199 ms | 20,985 / 22,701 |
+| 1.44 million observations | 62.713 ms | 28.513 ms | -54.5% | 1.230 / 2.612 ms | 60,195 / 61,474 |
+
+The compatible daily branch itself stayed effectively constant at about 1.1 ms and 565-566 shared
+hits across both scales. Total shared hits remain volume-sensitive because complex filters and the
+rolling 48-hour comparison still read raw observations. Planning is also higher for the explicit
+coverage/fallback branches. These are intentional correctness costs and the next optimization
+boundary if real users create many detail-filtered subscriptions.
+
+The benchmark now requires an explicit, recorded `daily_trend_mode` of `aggregate` or `raw` for
+reproducible A/B output. In adjacent 1.44-million-row c32 runs, aggregate versus raw Service was
+20.39 versus 18.14 rps, p50 1,432 versus 1,620 ms, and p95 2,074 versus 2,210 ms. Full ASGI was
+18.96 versus 15.59 rps, p50 1,312 versus 1,647 ms, and p95 2,323 versus 2,857 ms. Pool timeouts did
+not improve monotonically. Reference-scale adjacent runs also reversed the throughput ordering
+while other local workloads were active. The execution-plan reduction and exact verifier therefore
+remain the acceptance evidence; concurrency results are not production capacity claims.
+PostgreSQL/OS cold caches were not reset.
 
 ## Runtime isolation
 
@@ -146,15 +254,17 @@ FareScope remains a modular monolith, but each workload runs as a separate proce
 | Collector | Playwright/provider access, normalize artifacts, persist one collection result | Share API worker memory or hold a connection while browsing |
 | Analysis | Aggregates, trend windows, alert evaluation | Run CPU-heavy work on the API event loop |
 | Notification | Deliveries, retries, provider-specific throttles | Recompute price history for every recipient |
+| Export | Frozen-manifest CSV/JSON generation, hot/archive keyset reads, leases, and file cleanup | Share general worker concurrency or hold a database transaction while writing a file |
 
 Python is appropriate for these I/O-heavy boundaries when the API uses async database access and
 CPU-heavy work stays in worker processes or PostgreSQL aggregates. Horizontal API scaling is by
 process/container. Browser concurrency is scaled independently and is never coupled to API worker
 count.
 
-Every database transaction must finish before any browser request, notification request, or long
-Redis wait. A collector may keep normalized data in memory and then open one short persistence
-transaction.
+Every database transaction must finish before any browser request, notification request, long Redis
+wait, or export file write. A collector may keep normalized data in memory and then open one short
+persistence transaction. An export reads one keyset page under the partition shared lock, closes
+that transaction, writes the page, and records its lease heartbeat in a separate short transaction.
 
 ## Connection budget
 
@@ -169,8 +279,13 @@ must stay below 120 direct client connections, leaving at least 50 connections o
 | Collector persistence | 4 | 2 | 2 | 16 |
 | Analysis | 2 | 4 | 2 | 12 |
 | Notification | 2 | 4 | 2 | 12 |
+| Export generation | 2 | 2 | 0 | 4 |
 | Migration/maintenance allowance | n/a | n/a | n/a | 10 |
-| Total planned maximum |  |  |  | 102 |
+| Total planned maximum |  |  |  | 106 |
+
+The export allocation matches the dedicated worker's initial concurrency of two. Each worker task
+uses one short database session at a time; increasing export concurrency or its per-process pool
+must increase this budget before deployment.
 
 Production should place PgBouncer in transaction pooling mode between application processes and
 PostgreSQL. The table above remains the client-side hard budget; PgBouncer is not permission to
@@ -200,7 +315,7 @@ subscriptions, observations, itineraries, alerts, audit events, and deliveries.
 - Mutable history cursors carry an `as_of` UTC snapshot; immutable successful-run offer cursors
   carry the run id and filter fingerprint.
 - Date-range endpoints require both lower and upper bounds.
-- CSV/JSON exports run as background jobs and stream from a server-side cursor.
+- CSV/JSON exports run as background jobs and read snapshot-fenced keyset pages in short sessions.
 - Count totals are omitted from hot endpoints unless served by a maintained aggregate.
 
 Required production access paths:
@@ -212,6 +327,7 @@ Required production access paths:
 | Due subscriptions | `next_due_at, id` | partial `(next_due_at, id) WHERE enabled` |
 | First-leg route lookup | `departure_date, search_query_id` | partial `(origin_code, destination_code, departure_date, search_query_id) WHERE position = 0` |
 | Price history | `observed_at, collection_run_id` | partial partition index `(search_query_id, observed_at, collection_run_id) WHERE is_lowest` with selected payload included |
+| Dashboard daily trend | `observation_date` | `(search_query_id, currency, direct_only, observation_date)` with exact daily statistics included |
 | Calendar matrix | `departure_date, return_date` | `(search_query_id, departure_date, return_date, observed_at)` |
 | Collection-run list | `scheduled_at DESC, id DESC` | `(search_query_id, scheduled_at)` plus bounded top-N merge |
 | Pending collection lease | `scheduled_at, id` | partial `(scheduled_at, id) WHERE status = 'pending'` |
@@ -245,17 +361,22 @@ observation time. The maintenance job now:
 5. Leaves permanent purge disabled; an operator must configure a purge horizon longer than the
    archive horizon, and only already-archived tables are eligible.
 
-The hot/archive horizon is implemented and PostgreSQL-tested, but archived tables are not yet read
-by the normal history APIs. Restore, explicit archive querying, or future background export is
-required to inspect those older rows. Database backups must include both `public` and
-`farescope_archive`.
+The hot/archive horizon is implemented and PostgreSQL-tested. Normal history APIs still do not read
+archived tables, but background CSV/JSON price exports read retained archived
+`price_observations` directly under the partition shared lock and a frozen successful-run manifest.
+Restore or explicit operational querying is still required to expose archived rows through hot APIs
+or rebuild aggregates. Database backups must include both `public` and `farescope_archive`.
 
 Retention that is still `needs scale verification`:
 
 - Redacted collection artifacts: 30 days by default, configurable by administrators.
 - Audit and notification delivery metadata: 13 months, excluding encrypted secrets.
-- Maintained day/hour trend aggregates: horizon and refresh strategy remain unimplemented; the
-  1.44-million-observation result shows this is the next dashboard scaling requirement.
+- Daily trend rows are maintained for every newly collected UTC day and survive observation
+  partition archival. Run the desired historical backfill before detaching a source partition;
+  ordinary maintenance cannot reconstruct a day once its raw partition leaves `public`.
+- Aggregate retention currently follows its canonical search through `ON DELETE CASCADE`. A
+  separate long-term aggregate purge horizon remains `needs scale verification`; do not shorten it
+  below the product's visible trend/export horizon.
 
 Partition retention values are bounded deployment settings. Lifecycle work runs in the dedicated
 maintenance task and never inside an API request. `DETACH PARTITION` still takes PostgreSQL locks;

@@ -8,6 +8,7 @@ import { fareQueryKeys, getCalendarPrices, getDashboardOverview, getPriceHistory
 import { DataModeNotice } from '@/components/fare/DataModeNotice'
 import { LowFareCalendar } from '@/components/fare/LowFareCalendar'
 import { PriceFreshnessBadge } from '@/components/fare/PriceFreshnessBadge'
+import { PriceExportPanel } from '@/components/fare/PriceExportPanel'
 import { QueryState } from '@/components/fare/QueryState'
 import { RoundTripMatrix } from '@/components/fare/RoundTripMatrix'
 import { PageShell, PageStat, PageStatStrip, PageSurface } from '@/components/layout/PageScaffold'
@@ -175,6 +176,7 @@ export default function PriceHistory() {
                       </Table>
                       {history.hasNextPage ? <div className="flex justify-center border-t p-4"><button type="button" className="text-sm font-medium text-primary" onClick={() => history.fetchNextPage()} disabled={history.isFetchingNextPage}>{history.isFetchingNextPage ? <LoaderCircle className="mr-2 inline animate-spin" aria-hidden="true" /> : null}加载更早观测</button></div> : null}
                     </PageSurface>
+                    <PriceExportPanel subscriptionId={routeId} defaultDays={days} />
                   </div>
                 ) : <EmptyState title="暂无历史观测" description="完成一次采集后，价格历史会出现在这里。" />}
               </QueryState>

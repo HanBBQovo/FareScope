@@ -18,6 +18,8 @@ from app.domain.search import SearchFilters
 from app.models import (
     CalendarPriceObservation,
     CollectionRun,
+    DailyTrendAggregate,
+    DailyTrendAggregateCoverage,
     FareOffer,
     Itinerary,
     LatestCalendarPriceSnapshot,
@@ -37,6 +39,7 @@ from app.services.collection_persistence import (
     finalize_collection_success,
     persist_collection_payloads,
 )
+from app.services.daily_trends import maintain_daily_trend_aggregates
 from app.services.fare_data import (
     SubscriptionFareContext,
     list_latest_calendar_prices,
@@ -188,6 +191,23 @@ async def test_fixture_capture_persists_idempotent_calendar_and_itinerary_graph(
             assert first.price_observation_count == 2
             assert first.latest_snapshot_count == 2
             assert first.diagnostics == ()
+
+            daily_trends = (
+                await session.scalars(
+                    select(DailyTrendAggregate)
+                    .where(DailyTrendAggregate.search_query_id == query.id)
+                    .order_by(DailyTrendAggregate.direct_only)
+                )
+            ).all()
+            assert len(daily_trends) == 2
+            assert [item.direct_only for item in daily_trends] == [False, True]
+            assert [item.sample_count for item in daily_trends] == [1, 1]
+            coverage = await session.get(
+                DailyTrendAggregateCoverage,
+                (query.id, observed_at.date()),
+            )
+            assert coverage is not None
+            assert coverage.source_last_observed_at == observed_at
 
             second = await persist_collection_payloads(
                 session,
@@ -610,10 +630,72 @@ async def test_fixture_capture_persists_idempotent_calendar_and_itinerary_graph(
                 contexts=(context, alternate_context),
                 as_of=observed_at + timedelta(hours=27),
             )
+            raw_analytics = await load_dashboard_price_analytics(
+                session,
+                contexts=(context, alternate_context),
+                as_of=observed_at + timedelta(hours=27),
+                use_daily_aggregates=False,
+            )
+            assert analytics == raw_analytics
             assert len(analytics.trend) == 1
             assert analytics.trend[0].price_minor == 185075
             assert analytics.trend[0].sample_count == 4
             assert analytics.price_change_percent == 0.0
+
+            trend_as_of = observed_at + timedelta(hours=27)
+            coverage_start = (trend_as_of - timedelta(days=30)).date() + timedelta(days=1)
+            coverage_end = trend_as_of.date() - timedelta(days=1)
+            first_maintenance_page = await maintain_daily_trend_aggregates(
+                session,
+                start_date=coverage_start,
+                end_date=coverage_end,
+                batch_size=10,
+                search_query_id=query.id,
+            )
+            second_maintenance_page = await maintain_daily_trend_aggregates(
+                session,
+                start_date=coverage_start,
+                end_date=coverage_end,
+                batch_size=100,
+                search_query_id=query.id,
+                after=first_maintenance_page.next_cursor,
+            )
+            rerun = await maintain_daily_trend_aggregates(
+                session,
+                start_date=coverage_start,
+                end_date=coverage_end,
+                batch_size=100,
+                search_query_id=query.id,
+            )
+            assert first_maintenance_page.day_count == 10
+            assert first_maintenance_page.next_cursor is not None
+            assert second_maintenance_page.day_count == 19
+            assert (
+                first_maintenance_page.aggregate_count
+                + second_maintenance_page.aggregate_count
+                == 2
+            )
+            assert rerun.day_count == 29
+            assert rerun.aggregate_count == 2
+            covered_analytics = await load_dashboard_price_analytics(
+                session,
+                contexts=(context, alternate_context),
+                as_of=trend_as_of,
+            )
+            assert covered_analytics == raw_analytics
+
+            all_filter_analytics = await load_dashboard_price_analytics(
+                session,
+                contexts=batch_contexts,
+                as_of=trend_as_of,
+            )
+            all_filter_raw_analytics = await load_dashboard_price_analytics(
+                session,
+                contexts=batch_contexts,
+                as_of=trend_as_of,
+                use_daily_aggregates=False,
+            )
+            assert all_filter_analytics == all_filter_raw_analytics
             dashboard_stats = await load_dashboard_subscription_stats(
                 session,
                 user_id=user.id,

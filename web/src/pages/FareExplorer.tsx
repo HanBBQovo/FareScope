@@ -100,7 +100,8 @@ export default function FareExplorer() {
     enabled: Boolean(submittedQuery),
     refetchInterval: (query) => {
       const status = query.state.data?.pages[0]?.collection.status
-      return status === 'pending' || status === 'leased' || status === 'running' ? 2500 : false
+      if (status !== 'pending' && status !== 'leased' && status !== 'running') return false
+      return 10_000
     },
   })
   const resultPages = useMemo(() => result.data?.pages || [], [result.data?.pages])

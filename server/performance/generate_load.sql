@@ -790,6 +790,120 @@ CROSS JOIN LATERAL (
 CROSS JOIN perf_seed_config
 ON CONFLICT DO NOTHING;
 
+WITH daily_run_minima AS (
+    SELECT
+        search_query_id,
+        (observed_at AT TIME ZONE 'UTC')::date AS observation_date,
+        currency,
+        false AS direct_only,
+        collection_run_id,
+        observed_at,
+        min(total_price_minor) AS price_minor
+    FROM price_observations
+    WHERE offer_fingerprint LIKE 'perf:%'
+      AND is_lowest IS TRUE
+    GROUP BY
+        search_query_id,
+        (observed_at AT TIME ZONE 'UTC')::date,
+        currency,
+        collection_run_id,
+        observed_at
+    UNION ALL
+    SELECT
+        search_query_id,
+        (observed_at AT TIME ZONE 'UTC')::date AS observation_date,
+        currency,
+        true AS direct_only,
+        collection_run_id,
+        observed_at,
+        min(total_price_minor) AS price_minor
+    FROM price_observations
+    WHERE offer_fingerprint LIKE 'perf:%'
+      AND is_lowest IS TRUE
+      AND is_direct IS TRUE
+    GROUP BY
+        search_query_id,
+        (observed_at AT TIME ZONE 'UTC')::date,
+        currency,
+        collection_run_id,
+        observed_at
+)
+INSERT INTO daily_trend_aggregates (
+    search_query_id,
+    observation_date,
+    currency,
+    direct_only,
+    lowest_price_minor,
+    highest_price_minor,
+    price_sum_minor,
+    sample_count,
+    first_observed_at,
+    last_observed_at,
+    created_at,
+    updated_at
+)
+SELECT
+    search_query_id,
+    observation_date,
+    currency,
+    direct_only,
+    min(price_minor),
+    max(price_minor),
+    sum(price_minor),
+    count(*),
+    min(observed_at),
+    max(observed_at),
+    current_timestamp,
+    current_timestamp
+FROM daily_run_minima
+GROUP BY search_query_id, observation_date, currency, direct_only
+ON CONFLICT (search_query_id, observation_date, currency, direct_only) DO UPDATE SET
+    lowest_price_minor = EXCLUDED.lowest_price_minor,
+    highest_price_minor = EXCLUDED.highest_price_minor,
+    price_sum_minor = EXCLUDED.price_sum_minor,
+    sample_count = EXCLUDED.sample_count,
+    first_observed_at = EXCLUDED.first_observed_at,
+    last_observed_at = EXCLUDED.last_observed_at,
+    updated_at = current_timestamp;
+
+INSERT INTO daily_trend_aggregate_coverage (
+    search_query_id,
+    observation_date,
+    source_last_observed_at,
+    refreshed_at
+)
+WITH coverage_days AS (
+    SELECT
+        search_seed.search_query_id,
+        calendar_day::date AS observation_date
+    FROM perf_search_seed AS search_seed
+    CROSS JOIN perf_seed_config
+    CROSS JOIN generate_series(
+        (seed_anchor AT TIME ZONE 'UTC')::date - 89,
+        (seed_anchor AT TIME ZONE 'UTC')::date,
+        interval '1 day'
+    ) AS calendar(calendar_day)
+), source_days AS (
+    SELECT
+        search_query_id,
+        (observed_at AT TIME ZONE 'UTC')::date AS observation_date,
+        max(observed_at) AS source_last_observed_at
+    FROM price_observations
+    WHERE offer_fingerprint LIKE 'perf:%'
+      AND is_lowest IS TRUE
+    GROUP BY search_query_id, (observed_at AT TIME ZONE 'UTC')::date
+)
+SELECT
+    coverage_days.search_query_id,
+    coverage_days.observation_date,
+    source_days.source_last_observed_at,
+    current_timestamp
+FROM coverage_days
+LEFT JOIN source_days USING (search_query_id, observation_date)
+ON CONFLICT (search_query_id, observation_date) DO UPDATE SET
+    source_last_observed_at = EXCLUDED.source_last_observed_at,
+    refreshed_at = current_timestamp;
+
 INSERT INTO daily_price_aggregates (
     id,
     search_query_id,
@@ -835,6 +949,8 @@ ANALYZE latest_price_snapshots;
 ANALYZE latest_calendar_price_snapshots;
 ANALYZE price_observations;
 ANALYZE daily_price_aggregates;
+ANALYZE daily_trend_aggregates;
+ANALYZE daily_trend_aggregate_coverage;
 
 SELECT 'users' AS relation, count(*) AS rows
 FROM users
@@ -871,4 +987,10 @@ UNION ALL
 SELECT 'latest calendar prices', count(*)
 FROM latest_calendar_price_snapshots
 WHERE source_endpoint = 'performance-fixture'
+UNION ALL
+SELECT 'daily trend aggregates', count(*)
+FROM daily_trend_aggregates
+UNION ALL
+SELECT 'daily trend coverage', count(*)
+FROM daily_trend_aggregate_coverage
 ORDER BY relation;

@@ -17,6 +17,15 @@ class TripType(StrEnum):
     ROUND_TRIP = "round_trip"
 
 
+class ExportStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    DELETING = "deleting"
+
+
 class CollectionStatus(StrEnum):
     PENDING = "pending"
     LEASED = "leased"

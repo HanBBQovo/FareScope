@@ -89,3 +89,11 @@ def test_partition_retention_is_non_destructive_by_default() -> None:
             collection_partition_archive_after_months=None,
             collection_partition_purge_after_months=84,
         )
+
+
+def test_export_retained_file_limit_covers_active_jobs() -> None:
+    with pytest.raises(ValueError, match="must cover all active"):
+        Settings(
+            export_max_active_jobs=5,
+            export_user_max_retained_files=4,
+        )

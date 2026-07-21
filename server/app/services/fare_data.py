@@ -6,8 +6,11 @@ from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    DateTime,
     Integer,
+    Numeric,
     String,
     Uuid,
     and_,
@@ -35,6 +38,8 @@ from app.api.pagination import BucketCursor, DatePairCursor, TimestampCursor
 from app.domain.search import SearchFilters
 from app.models import (
     CollectionRun,
+    DailyTrendAggregate,
+    DailyTrendAggregateCoverage,
     FareOffer,
     Itinerary,
     LatestCalendarPriceSnapshot,
@@ -95,6 +100,10 @@ class FareFilterSpec:
             or self.departure_minute_start is not None
             or self.departure_minute_end is not None
         )
+
+    @property
+    def supports_daily_trend_aggregate(self) -> bool:
+        return not self.requires_itinerary_scan and self.max_price_minor is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +230,22 @@ def _fare_filter_row(
     )
 
 
+def _dashboard_aggregate_filter_values(
+    rows: list[tuple[int, UUID, str, bool]],
+):
+    return (
+        values(
+            column("branch_number", Integer),
+            column("query_id", Uuid),
+            column("currency", String(3)),
+            column("direct_only", Boolean),
+            name="dashboard_daily_aggregate_filters",
+        )
+        .data(rows)
+        .cte("dashboard_daily_aggregate_filters")
+    )
+
+
 def _set_based_itinerary_filter_conditions(filter_rows) -> tuple[ColumnElement[bool], ...]:
     max_stops = cast(filter_rows.c.max_stops, Integer)
     max_duration_minutes = cast(filter_rows.c.max_duration_minutes, Integer)
@@ -235,9 +260,8 @@ def _set_based_itinerary_filter_conditions(filter_rows) -> tuple[ColumnElement[b
     ).correlate(Itinerary, filter_rows)
 
     first_segment = aliased(Segment)
-    departure_minute = (
-        extract("hour", first_segment.departure_local) * 60
-        + extract("minute", first_segment.departure_local)
+    departure_minute = extract("hour", first_segment.departure_local) * 60 + extract(
+        "minute", first_segment.departure_local
     )
     first_match = exists(
         select(1).where(
@@ -276,8 +300,7 @@ def _set_based_itinerary_filter_conditions(filter_rows) -> tuple[ColumnElement[b
         select(1).where(
             arrival_segment.itinerary_id == Itinerary.id,
             arrival_segment.leg_position == 0,
-            arrival_segment.destination_airport_code
-            == any_(filter_rows.c.arrival_airports),
+            arrival_segment.destination_airport_code == any_(filter_rows.c.arrival_airports),
             ~has_later_segment,
         )
     ).correlate(Itinerary, filter_rows)
@@ -309,8 +332,6 @@ def _dashboard_run_minima_statement(
     conditions: list[ColumnElement[bool]] = [
         PriceObservation.search_query_id == filter_rows.c.query_id,
         PriceObservation.currency == filter_rows.c.currency,
-        PriceObservation.observed_at >= since,
-        PriceObservation.observed_at <= as_of,
         or_(
             filter_rows.c.direct_only.is_(False),
             PriceObservation.is_direct.is_(True),
@@ -320,6 +341,12 @@ def _dashboard_run_minima_statement(
             PriceObservation.total_price_minor <= max_price_minor,
         ),
     ]
+    conditions.extend(
+        (
+            PriceObservation.observed_at >= since,
+            PriceObservation.observed_at <= as_of,
+        )
+    )
     statement = select(
         PriceObservation.collection_run_id.label("run_id"),
         PriceObservation.observed_at.label("observed_at"),
@@ -349,6 +376,153 @@ def _dashboard_run_minima_statement(
         run_minima.c.observed_at,
         run_minima.c.price_minor,
     ).select_from(filter_rows.join(run_minima, true()))
+
+
+def _dashboard_raw_trend_contribution(statement, *, name: str):
+    observations = statement.cte(name)
+    bucket = func.date_trunc(
+        "day",
+        func.timezone("UTC", observations.c.observed_at),
+    ).label("bucket")
+    return select(
+        observations.c.branch_number,
+        bucket,
+        func.min(observations.c.price_minor).label("lowest_price_minor"),
+        func.max(observations.c.price_minor).label("highest_price_minor"),
+        func.sum(observations.c.price_minor).label("price_sum_minor"),
+        func.count().label("sample_count"),
+    ).group_by(observations.c.branch_number, bucket)
+
+
+def _dashboard_daily_trend_contribution(
+    filter_rows,
+    *,
+    full_start: datetime,
+    full_end: datetime,
+):
+    return (
+        select(
+            filter_rows.c.branch_number,
+            cast(DailyTrendAggregate.observation_date, DateTime()).label("bucket"),
+            DailyTrendAggregate.lowest_price_minor,
+            DailyTrendAggregate.highest_price_minor,
+            DailyTrendAggregate.price_sum_minor,
+            DailyTrendAggregate.sample_count,
+        )
+        .select_from(filter_rows)
+        .join(
+            DailyTrendAggregate,
+            and_(
+                DailyTrendAggregate.search_query_id == filter_rows.c.query_id,
+                DailyTrendAggregate.currency == filter_rows.c.currency,
+                DailyTrendAggregate.direct_only == filter_rows.c.direct_only,
+                DailyTrendAggregate.observation_date >= full_start.date(),
+                DailyTrendAggregate.observation_date < full_end.date(),
+            ),
+        )
+    )
+
+
+def _dashboard_aggregate_coverage_groups(
+    filter_rows,
+    *,
+    full_start: datetime,
+    full_end: datetime,
+):
+    expected_day_count = (full_end - full_start).days
+    coverage_counts = (
+        select(
+            filter_rows.c.branch_number,
+            filter_rows.c.query_id,
+            filter_rows.c.currency,
+            filter_rows.c.direct_only,
+            func.count(DailyTrendAggregateCoverage.observation_date).label("covered_day_count"),
+        )
+        .select_from(filter_rows)
+        .outerjoin(
+            DailyTrendAggregateCoverage,
+            and_(
+                DailyTrendAggregateCoverage.search_query_id == filter_rows.c.query_id,
+                DailyTrendAggregateCoverage.observation_date >= full_start.date(),
+                DailyTrendAggregateCoverage.observation_date < full_end.date(),
+            ),
+        )
+        .group_by(
+            filter_rows.c.branch_number,
+            filter_rows.c.query_id,
+            filter_rows.c.currency,
+            filter_rows.c.direct_only,
+        )
+        .cte("dashboard_daily_coverage_counts")
+    )
+    columns = (
+        coverage_counts.c.branch_number,
+        coverage_counts.c.query_id,
+        coverage_counts.c.currency,
+        coverage_counts.c.direct_only,
+    )
+    covered_filters = (
+        select(*columns)
+        .where(coverage_counts.c.covered_day_count == expected_day_count)
+        .cte("dashboard_covered_aggregate_filters")
+    )
+    fallback_filters = (
+        select(*columns)
+        .where(coverage_counts.c.covered_day_count != expected_day_count)
+        .cte("dashboard_fallback_aggregate_filters")
+    )
+    return covered_filters, fallback_filters
+
+
+def _dashboard_simple_run_minima_statement(
+    filter_rows,
+    *,
+    range_start: datetime,
+    range_end: datetime,
+    range_end_inclusive: bool,
+):
+    end_condition = (
+        PriceObservation.observed_at <= range_end
+        if range_end_inclusive
+        else PriceObservation.observed_at < range_end
+    )
+    run_minima = lateral(
+        select(
+            PriceObservation.observed_at.label("observed_at"),
+            func.min(PriceObservation.total_price_minor).label("price_minor"),
+        )
+        .where(
+            PriceObservation.search_query_id == filter_rows.c.query_id,
+            PriceObservation.currency == filter_rows.c.currency,
+            PriceObservation.observed_at >= range_start,
+            end_condition,
+            PriceObservation.is_lowest.is_(True),
+            or_(
+                filter_rows.c.direct_only.is_(False),
+                PriceObservation.is_direct.is_(True),
+            ),
+        )
+        .group_by(
+            PriceObservation.collection_run_id,
+            PriceObservation.observed_at,
+        )
+    ).alias("dashboard_simple_run_minima")
+    return select(
+        filter_rows.c.branch_number,
+        run_minima.c.observed_at,
+        run_minima.c.price_minor,
+    ).select_from(filter_rows.join(run_minima, true()))
+
+
+def _full_utc_day_range(since: datetime, as_of: datetime) -> tuple[datetime, datetime]:
+    since_utc = since.astimezone(UTC)
+    as_of_utc = as_of.astimezone(UTC)
+    since_midnight = datetime.combine(since_utc.date(), datetime.min.time(), tzinfo=UTC)
+    full_start = (
+        since_midnight if since_utc == since_midnight else since_midnight + timedelta(days=1)
+    )
+    full_end = datetime.combine(as_of_utc.date(), datetime.min.time(), tzinfo=UTC)
+    return full_start, max(full_start, full_end)
 
 
 async def load_subscription_fare_context(
@@ -445,9 +619,7 @@ async def load_collection_health(
             Subscription.next_due_at.is_not(None),
         )
     )
-    success_rate = (
-        successful_24h / terminal_24h * 100 if terminal_24h else None
-    )
+    success_rate = successful_24h / terminal_24h * 100 if terminal_24h else None
     return CollectionHealthStats(
         last_success_at=last_success_at,
         success_rate_24h=success_rate,
@@ -481,6 +653,7 @@ async def load_dashboard_price_analytics(
     as_of: datetime,
     days: int = 30,
     currency: str = "CNY",
+    use_daily_aggregates: bool = True,
 ) -> DashboardPriceAnalytics:
     """Aggregate a bounded trend for the active, visible dashboard routes.
 
@@ -515,7 +688,136 @@ async def load_dashboard_price_analytics(
         for branch_number, ((_, filters), context) in enumerate(grouped_contexts.items())
     ]
     since = as_of - timedelta(days=days)
-    observation_statements = []
+    full_start, full_end = _full_utc_day_range(since, as_of)
+    aggregate_entries = (
+        [entry for entry in filter_entries if entry[2].supports_daily_trend_aggregate]
+        if use_daily_aggregates
+        else []
+    )
+    raw_entries = [entry for entry in filter_entries if entry not in aggregate_entries]
+    trend_statements = []
+
+    for requires_itinerary_scan in (False, True):
+        matching_entries = [
+            entry
+            for entry in raw_entries
+            if entry[2].requires_itinerary_scan is requires_itinerary_scan
+        ]
+        if not matching_entries:
+            continue
+        filter_rows = _fare_filter_values(
+            [
+                _fare_filter_row(
+                    branch_number,
+                    context.search_query.id,
+                    context.search_query.currency,
+                    filters,
+                )
+                for branch_number, context, filters in matching_entries
+            ],
+            name=(
+                "dashboard_raw_scan_filters"
+                if requires_itinerary_scan
+                else "dashboard_raw_simple_filters"
+            ),
+        )
+        trend_statements.append(
+            _dashboard_raw_trend_contribution(
+                _dashboard_run_minima_statement(
+                    filter_rows,
+                    since=since,
+                    as_of=as_of,
+                    requires_itinerary_scan=requires_itinerary_scan,
+                ),
+                name=(
+                    "dashboard_raw_scan_observations"
+                    if requires_itinerary_scan
+                    else "dashboard_raw_simple_observations"
+                ),
+            )
+        )
+
+    if aggregate_entries:
+        aggregate_filter_rows = _dashboard_aggregate_filter_values(
+            [
+                (
+                    branch_number,
+                    context.search_query.id,
+                    context.search_query.currency,
+                    filters.direct_only,
+                )
+                for branch_number, context, filters in aggregate_entries
+            ]
+        )
+        if full_start < full_end:
+            covered_filter_rows, fallback_filter_rows = _dashboard_aggregate_coverage_groups(
+                aggregate_filter_rows,
+                full_start=full_start,
+                full_end=full_end,
+            )
+            trend_statements.append(
+                _dashboard_daily_trend_contribution(
+                    covered_filter_rows,
+                    full_start=full_start,
+                    full_end=full_end,
+                )
+            )
+            trend_statements.append(
+                _dashboard_raw_trend_contribution(
+                    _dashboard_simple_run_minima_statement(
+                        fallback_filter_rows,
+                        range_start=since,
+                        range_end=as_of,
+                        range_end_inclusive=True,
+                    ),
+                    name="dashboard_fallback_aggregate_observations",
+                )
+            )
+            if since < full_start:
+                trend_statements.append(
+                    _dashboard_raw_trend_contribution(
+                        _dashboard_simple_run_minima_statement(
+                            covered_filter_rows,
+                            range_start=since,
+                            range_end=full_start,
+                            range_end_inclusive=False,
+                        ),
+                        name="dashboard_aggregate_start_boundary_observations",
+                    )
+                )
+            if full_end <= as_of:
+                trend_statements.append(
+                    _dashboard_raw_trend_contribution(
+                        _dashboard_simple_run_minima_statement(
+                            covered_filter_rows,
+                            range_start=max(full_end, since),
+                            range_end=as_of,
+                            range_end_inclusive=True,
+                        ),
+                        name="dashboard_aggregate_end_boundary_observations",
+                    )
+                )
+        else:
+            trend_statements.append(
+                _dashboard_raw_trend_contribution(
+                    _dashboard_simple_run_minima_statement(
+                        aggregate_filter_rows,
+                        range_start=since,
+                        range_end=as_of,
+                        range_end_inclusive=True,
+                    ),
+                    name="dashboard_no_full_day_observations",
+                )
+            )
+
+    contribution_statement = (
+        trend_statements[0] if len(trend_statements) == 1 else union_all(*trend_statements)
+    )
+    contributions = contribution_statement.cte("dashboard_trend_contributions")
+
+    rolling_statements = []
+    previous_start = as_of - timedelta(hours=48)
+    current_start = as_of - timedelta(hours=24)
     for requires_itinerary_scan in (False, True):
         matching_entries = [
             entry
@@ -535,57 +837,53 @@ async def load_dashboard_price_analytics(
                 for branch_number, context, filters in matching_entries
             ],
             name=(
-                "dashboard_scan_filters"
+                "dashboard_rolling_scan_filters"
                 if requires_itinerary_scan
-                else "dashboard_simple_filters"
+                else "dashboard_rolling_simple_filters"
             ),
         )
-        observation_statements.append(
+        rolling_statements.append(
             _dashboard_run_minima_statement(
                 filter_rows,
-                since=since,
+                since=previous_start,
                 as_of=as_of,
                 requires_itinerary_scan=requires_itinerary_scan,
             )
         )
-    observation_statement = (
-        observation_statements[0]
-        if len(observation_statements) == 1
-        else union_all(*observation_statements)
+    rolling_statement = (
+        rolling_statements[0] if len(rolling_statements) == 1 else union_all(*rolling_statements)
     )
-    observations = observation_statement.cte("dashboard_price_observations")
-    bucket = func.date_trunc(
-        "day",
-        func.timezone("UTC", observations.c.observed_at),
-    ).label("bucket")
-    current_start = as_of - timedelta(hours=24)
-    previous_start = as_of - timedelta(hours=48)
+    rolling = rolling_statement.cte("dashboard_rolling_observations")
     current_price = (
-        select(func.min(observations.c.price_minor))
-        .where(observations.c.observed_at >= current_start)
+        select(func.min(rolling.c.price_minor))
+        .where(rolling.c.observed_at >= current_start)
         .scalar_subquery()
     )
     previous_price = (
-        select(func.min(observations.c.price_minor))
+        select(func.min(rolling.c.price_minor))
         .where(
-            observations.c.observed_at >= previous_start,
-            observations.c.observed_at < current_start,
+            rolling.c.observed_at >= previous_start,
+            rolling.c.observed_at < current_start,
         )
         .scalar_subquery()
     )
+    sample_count = func.sum(contributions.c.sample_count)
+    price_sum = cast(func.sum(contributions.c.price_sum_minor), Numeric(38, 0))
     rows = (
         await session.execute(
             select(
-                bucket,
-                func.min(observations.c.price_minor).label("lowest_price_minor"),
-                func.max(observations.c.price_minor).label("highest_price_minor"),
-                func.avg(observations.c.price_minor).label("average_price_minor"),
-                func.count().label("sample_count"),
+                contributions.c.bucket,
+                func.min(contributions.c.lowest_price_minor).label("lowest_price_minor"),
+                func.max(contributions.c.highest_price_minor).label("highest_price_minor"),
+                (price_sum / cast(func.nullif(sample_count, 0), Numeric(38, 0))).label(
+                    "average_price_minor"
+                ),
+                cast(sample_count, BigInteger).label("sample_count"),
                 current_price.label("current_price_minor"),
                 previous_price.label("previous_price_minor"),
             )
-            .group_by(bucket)
-            .order_by(bucket)
+            .group_by(contributions.c.bucket)
+            .order_by(contributions.c.bucket)
             .limit(days + 1)
         )
     ).all()
@@ -599,7 +897,7 @@ async def load_dashboard_price_analytics(
             lowest_price_minor=row.lowest_price_minor,
             highest_price_minor=row.highest_price_minor,
             average_price_minor=float(row.average_price_minor),
-            sample_count=row.sample_count,
+            sample_count=int(row.sample_count),
         )
         for row in rows
     )
@@ -666,8 +964,7 @@ async def load_subscription_latest_fares(
             Itinerary.search_query_id == filter_rows.c.query_id,
             or_(
                 cast(filter_rows.c.max_price_minor, Integer).is_(None),
-                FareOffer.total_price_minor
-                <= cast(filter_rows.c.max_price_minor, Integer),
+                FareOffer.total_price_minor <= cast(filter_rows.c.max_price_minor, Integer),
             ),
             *_set_based_itinerary_filter_conditions(filter_rows),
         )
@@ -682,9 +979,7 @@ async def load_subscription_latest_fares(
                 latest_run.c.finished_at,
                 best_offer.c.total_price_minor,
                 best_offer.c.currency,
-            ).select_from(
-                filter_rows.join(latest_run, true()).join(best_offer, true())
-            )
+            ).select_from(filter_rows.join(latest_run, true()).join(best_offer, true()))
         )
     ).all()
     result: dict[UUID, SubscriptionLatestFare] = {}
@@ -828,9 +1123,7 @@ async def load_price_history(
             )
         rows = (
             await session.execute(
-                statement.order_by(run_minima.c.observed_at, run_minima.c.run_id).limit(
-                    limit + 1
-                )
+                statement.order_by(run_minima.c.observed_at, run_minima.c.run_id).limit(limit + 1)
             )
         ).all()
         has_more = len(rows) > limit
@@ -867,9 +1160,7 @@ async def load_price_history(
         if isinstance(after, BucketCursor):
             statement = statement.where(aggregate.c.bucket > after.bucket)
         rows = (
-            await session.execute(
-                statement.order_by(aggregate.c.bucket).limit(limit + 1)
-            )
+            await session.execute(statement.order_by(aggregate.c.bucket).limit(limit + 1))
         ).all()
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -926,13 +1217,9 @@ def itinerary_filter_conditions(filters: FareFilterSpec) -> tuple[ColumnElement[
             first_conditions.append(
                 first_segment.origin_airport_code.in_(filters.departure_airports)
             )
-        if (
-            filters.departure_minute_start is not None
-            and filters.departure_minute_end is not None
-        ):
-            departure_minute = (
-                extract("hour", first_segment.departure_local) * 60
-                + extract("minute", first_segment.departure_local)
+        if filters.departure_minute_start is not None and filters.departure_minute_end is not None:
+            departure_minute = extract("hour", first_segment.departure_local) * 60 + extract(
+                "minute", first_segment.departure_local
             )
             first_conditions.extend(
                 (

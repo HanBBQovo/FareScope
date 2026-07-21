@@ -16,6 +16,10 @@ def test_expected_persistence_tables_are_registered() -> None:
         "collection_artifacts",
         "collection_runs",
         "daily_price_aggregates",
+        "daily_trend_aggregate_coverage",
+        "daily_trend_aggregates",
+        "export_job_collection_runs",
+        "export_jobs",
         "fare_offers",
         "itineraries",
         "latest_calendar_price_snapshots",
@@ -44,7 +48,7 @@ def test_user_owned_resources_and_shared_queries_are_constrained() -> None:
     }
     assert ("query_hash",) in query_unique_columns
 
-    for table_name in ("subscriptions", "notification_channels", "alert_rules"):
+    for table_name in ("subscriptions", "notification_channels", "alert_rules", "export_jobs"):
         table = Base.metadata.tables[table_name]
         user_foreign_key = next(iter(table.c.user_id.foreign_keys))
         assert user_foreign_key.target_fullname == "users.id"
@@ -101,3 +105,19 @@ def test_price_observations_use_utc_partition_key_and_minor_units() -> None:
 
     ddl = str(CreateTable(observations).compile(dialect=postgresql.dialect()))
     assert "PARTITION BY RANGE (observed_at)" in ddl
+
+
+def test_daily_trend_aggregates_preserve_exact_weighted_statistics() -> None:
+    aggregates = Base.metadata.tables["daily_trend_aggregates"]
+    coverage = Base.metadata.tables["daily_trend_aggregate_coverage"]
+
+    assert tuple(aggregates.primary_key.columns.keys()) == (
+        "search_query_id",
+        "observation_date",
+        "currency",
+        "direct_only",
+    )
+    assert isinstance(aggregates.c.lowest_price_minor.type, Integer)
+    assert aggregates.c.price_sum_minor.type.python_type is int
+    assert aggregates.c.sample_count.type.python_type is int
+    assert coverage.c.source_last_observed_at.type.timezone is True

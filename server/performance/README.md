@@ -30,10 +30,39 @@ export FARESCOPE_DATABASE_URL='postgresql+asyncpg://farescope:farescope@127.0.0.
 uv run alembic upgrade head
 uv run python -m performance.seed_database \
   --confirm I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE
+uv run python -m performance.verify_daily_trends
 ```
 
 `seed_database.py` executes the same checked-in `generate_load.sql` through asyncpg. The psql
-workflow remains available for environments that provide the client:
+workflow remains available for environments that provide the client. The generator builds exact
+per-run daily statistics and 90 UTC dates of coverage, including empty dates, so the Dashboard
+benchmark exercises the maintained read path without a separate historical job. The verifier
+recomputes all statistics from raw observations and exits nonzero on any aggregate or coverage
+difference.
+
+Production migrations do not perform this seed/backfill. After deploying the current Alembic head
+`20260721_0014` (the trend schema was introduced in `20260721_0013`), use the bounded maintenance
+CLI instead. Its 30-day default fits the previous and current monthly partitions created by a
+normal installation, uses 500-key transactions, and writes an atomic checkpoint after every
+committed batch:
+
+```bash
+uv run python -m app.maintenance.daily_trends \
+  --checkpoint-file var/daily-trends-30d.json
+```
+
+Every commit emits one JSON line immediately. Reusing the same checkpoint resumes its last durable
+cursor; a completed checkpoint returns without scanning candidates again. If a process commits but
+stops before its checkpoint replacement, the next invocation replays at most one idempotent batch.
+Without a checkpoint, the JSON output still carries the cursor accepted by the paired
+`--after-date` and `--after-search-query-id` options.
+
+Historical ranges longer than the default are explicit operations. All overlapping source months
+must still be attached to `public.price_observations` (or be restored first). A detached archive or
+missing/purged source month emits `blocked_source_unavailable`, exits nonzero, and leaves existing
+aggregate and coverage rows unchanged. Unavailable history is never rewritten as an empty day.
+
+The psql workflow remains available for environments that provide the client:
 
 ```bash
 export FARESCOPE_PERF_DATABASE_URL='postgresql://farescope:farescope@localhost:5432/farescope_perf'
@@ -79,9 +108,20 @@ The profiler loads one generated user's visible subscriptions, captures the real
 statements for subscription lists, latest filtered fares, exact fare totals, offer pages, segment
 hydration, raw/daily history, one-way/round-trip calendars, dashboard trends/counts, and collection
 health, then reruns every captured read with `EXPLAIN (ANALYZE, BUFFERS, SETTINGS, FORMAT JSON)`.
-It is read-only, but `EXPLAIN ANALYZE` executes each query. Run it three times for warm-cache ranges.
+For the Dashboard trend it also prints the twenty slowest plan nodes so aggregate, detail-filtered
+raw, boundary, and rolling branches can be attributed separately. It is read-only, but
+`EXPLAIN ANALYZE` executes each query. Run it three times for warm-cache ranges.
 
-Run the concurrent service and full in-process ASGI API matrix with:
+To verify maintenance candidate discovery independently of raw observation volume, compare the
+subscription-catalog page with the removed full-range raw discovery query:
+
+```bash
+uv run python -m performance.profile_daily_trend_maintenance
+```
+
+Run the concurrent service and full in-process ASGI API matrix with an explicit daily trend mode.
+For a valid A/B comparison, use the same fresh database and adjacent commands that differ only by
+`--daily-trend-mode` and output path:
 
 ```bash
 uv run python -m performance.concurrent_benchmark \
@@ -91,15 +131,27 @@ uv run python -m performance.concurrent_benchmark \
   --warmup-requests 4 \
   --users 64 \
   --client-cold-probe \
-  --output performance/results/reference-concurrency.json
+  --daily-trend-mode aggregate \
+  --output performance/results/reference-aggregate.json
+
+uv run python -m performance.concurrent_benchmark \
+  --confirm I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE \
+  --concurrency 1,8,16,32 \
+  --requests-per-scenario 80 \
+  --warmup-requests 4 \
+  --users 64 \
+  --client-cold-probe \
+  --daily-trend-mode raw \
+  --output performance/results/reference-raw.json
 ```
 
 The matrix covers a 100-route dashboard, fare search, daily price history, calendar prices,
 subscription lists, collection-run lists, and collection operations. It records p50/p95/p99,
 throughput, status/error counts, SQL statement timing, private QueuePool acquisition timing, peak
-checked-out connections, and database/environment metadata. The QueuePool hook is intentionally
-performance-only and uses SQLAlchemy's private `_do_get` method; rerun the smoke matrix after a
-SQLAlchemy upgrade.
+checked-out connections, database/environment metadata, and the selected `daily_trend_mode` in the
+JSON configuration. Do not compare older result files that lack that field. The QueuePool hook is
+intentionally performance-only and uses SQLAlchemy's private `_do_get` method; rerun the smoke
+matrix after a SQLAlchemy upgrade.
 
 The API layer executes authentication, ownership checks, database reads, Pydantic serialization,
 and middleware through `httpx.ASGITransport`. It does not include a TCP socket, Uvicorn scheduling,
@@ -134,6 +186,15 @@ server to manufacture a cold-cache number.
 - Confirm bounded price history prunes unrelated monthly partitions.
 - Confirm selective reads do not sequentially scan high-cardinality tables.
 - Confirm no external disk sort occurs at page size 50 or lease batch size 100.
+- Run `performance.verify_daily_trends` and require zero aggregate and coverage differences. Its
+  expected coverage is the complete query-by-date calendar, so missing, extra, and incorrect NULL
+  watermarks on empty days all fail verification.
+- Detach an old source partition in the PostgreSQL fixture and confirm maintenance refuses the
+  range without changing the existing historical aggregate or coverage watermark.
+- Confirm aggregate-compatible Dashboard contexts have complete coverage; an incomplete fixture
+  correctly benchmarks the raw fallback rather than aggregate performance.
+- Compare explicit `aggregate` and `raw` benchmark outputs only when both JSON configurations
+  record the requested `daily_trend_mode`.
 - Confirm the same query plan is stable across three warm runs.
 - Record planning time, execution time, shared buffer hits/reads, and returned rows.
 - Compare index size and write cost before accepting any covering index.

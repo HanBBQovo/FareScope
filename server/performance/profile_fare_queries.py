@@ -267,6 +267,29 @@ async def main() -> None:
                 f"hits={root.get('Shared Hit Blocks', 0)} "
                 f"reads={root.get('Shared Read Blocks', 0)}"
             )
+            if label == "dashboard-trend":
+                nodes = []
+                pending = [root]
+                while pending:
+                    node = pending.pop()
+                    nodes.append(node)
+                    pending.extend(node.get("Plans", ()))
+                for node in sorted(
+                    nodes,
+                    key=lambda item: item.get("Actual Total Time", 0),
+                    reverse=True,
+                )[:20]:
+                    print(
+                        "NODE dashboard-trend "
+                        f"type={node['Node Type']} "
+                        f"parent={node.get('Parent Relationship', '-')} "
+                        f"subplan={node.get('Subplan Name', '-')} "
+                        f"relation={node.get('Relation Name', '-')} "
+                        f"time={node.get('Actual Total Time', 0):.3f}ms "
+                        f"loops={node.get('Actual Loops', 0)} "
+                        f"rows={node.get('Actual Rows', 0)} "
+                        f"hits={node.get('Shared Hit Blocks', 0)}"
+                    )
     finally:
         await connection.close()
 

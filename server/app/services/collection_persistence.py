@@ -42,6 +42,7 @@ from app.models import (
 )
 from app.models.enums import CollectionStatus
 from app.models.mixins import utc_now
+from app.services.daily_trends import refresh_daily_trend_day
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,14 +144,17 @@ async def persist_collection_payloads(
             parsed_itineraries = adapter.parse_itineraries(capture.payload)
             diagnostics.extend(parsed_itineraries.issues)
             schema_fingerprints.append(parsed_itineraries.schema_fingerprint)
-            persisted, itinerary_added, offer_added, itinerary_diagnostics = (
-                await _persist_itineraries(
-                    session,
-                    run=run,
-                    provider=provider,
-                    search_query=search_query,
-                    parsed=parsed_itineraries,
-                )
+            (
+                persisted,
+                itinerary_added,
+                offer_added,
+                itinerary_diagnostics,
+            ) = await _persist_itineraries(
+                session,
+                run=run,
+                provider=provider,
+                search_query=search_query,
+                parsed=parsed_itineraries,
             )
             persisted_offers.extend(persisted)
             itinerary_count += itinerary_added
@@ -240,6 +244,11 @@ async def finalize_collection_success(
             subscription.next_due_at = result.observed_at + timedelta(
                 seconds=subscription.poll_interval_seconds
             )
+    await refresh_daily_trend_day(
+        session,
+        search_query_id=search_query.id,
+        observation_date=result.observed_at.date(),
+    )
     await session.flush()
 
 
@@ -356,12 +365,16 @@ async def _persist_calendar(
         )
     if not rows:
         return 0, 0
-    statement = pg_insert(CalendarPriceObservation).values(rows).on_conflict_do_nothing(
-        index_elements=[
-            CalendarPriceObservation.observed_at,
-            CalendarPriceObservation.collection_run_id,
-            CalendarPriceObservation.fingerprint,
-        ]
+    statement = (
+        pg_insert(CalendarPriceObservation)
+        .values(rows)
+        .on_conflict_do_nothing(
+            index_elements=[
+                CalendarPriceObservation.observed_at,
+                CalendarPriceObservation.collection_run_id,
+                CalendarPriceObservation.fingerprint,
+            ]
+        )
     )
     await session.execute(statement)
     snapshot_values_by_key: dict[tuple[UUID, Any, Any, str], dict[str, Any]] = {}
@@ -387,10 +400,7 @@ async def _persist_calendar(
             row["currency"],
         )
         current = snapshot_values_by_key.get(key)
-        if (
-            current is None
-            or snapshot_value["lowest_price_minor"] < current["lowest_price_minor"]
-        ):
+        if current is None or snapshot_value["lowest_price_minor"] < current["lowest_price_minor"]:
             snapshot_values_by_key[key] = snapshot_value
     snapshot_values = list(snapshot_values_by_key.values())
     snapshot_statement = pg_insert(LatestCalendarPriceSnapshot).values(snapshot_values)
@@ -411,10 +421,7 @@ async def _persist_calendar(
             "direct_verified": snapshot_statement.excluded.direct_verified,
             "updated_at": utc_now(),
         },
-        where=(
-            LatestCalendarPriceSnapshot.observed_at
-            <= snapshot_statement.excluded.observed_at
-        ),
+        where=(LatestCalendarPriceSnapshot.observed_at <= snapshot_statement.excluded.observed_at),
     )
     snapshot_result = await session.execute(snapshot_statement)
     snapshot_count = (
@@ -575,8 +582,10 @@ async def _insert_segments_if_missing(
     if not rows:
         return
     values = [{"id": uuid4(), "itinerary_id": itinerary_id, **row} for row in rows]
-    statement = pg_insert(Segment).values(values).on_conflict_do_nothing(
-        index_elements=[Segment.itinerary_id, Segment.position]
+    statement = (
+        pg_insert(Segment)
+        .values(values)
+        .on_conflict_do_nothing(index_elements=[Segment.itinerary_id, Segment.position])
     )
     await session.execute(statement)
 
@@ -665,18 +674,20 @@ async def _persist_price_observations(
         }
         for offer in offers
     ]
-    statement = pg_insert(PriceObservation).values(observation_rows).on_conflict_do_nothing(
-        index_elements=[
-            PriceObservation.observed_at,
-            PriceObservation.collection_run_id,
-            PriceObservation.offer_fingerprint,
-        ]
+    statement = (
+        pg_insert(PriceObservation)
+        .values(observation_rows)
+        .on_conflict_do_nothing(
+            index_elements=[
+                PriceObservation.observed_at,
+                PriceObservation.collection_run_id,
+                PriceObservation.offer_fingerprint,
+            ]
+        )
     )
     result = await session.execute(statement)
     observation_count = (
-        result.rowcount
-        if result.rowcount is not None and result.rowcount >= 0
-        else len(offers)
+        result.rowcount if result.rowcount is not None and result.rowcount >= 0 else len(offers)
     )
 
     snapshot_rows = [
@@ -749,8 +760,7 @@ def _normalize_itinerary(
             continue
         valid_leg_count += 1
         stop_count += max(0, len(leg_rows) - 1) + sum(
-            int(row["segment_metadata"]["technical_stop_count"] or 0)
-            for row in leg_rows
+            int(row["segment_metadata"]["technical_stop_count"] or 0) for row in leg_rows
         )
         total_duration += sum(row["duration_minutes"] for row in leg_rows)
         for row in leg_rows:
@@ -772,8 +782,7 @@ def _normalize_itinerary(
         return None
 
     is_direct = all(
-        row["segment_metadata"]["technical_stop_count"] == 0
-        for row in segment_rows
+        row["segment_metadata"]["technical_stop_count"] == 0 for row in segment_rows
     ) and all(
         sum(1 for row in segment_rows if row["leg_position"] == leg.index) == 1
         for leg in itinerary.legs

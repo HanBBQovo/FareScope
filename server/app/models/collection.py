@@ -2,6 +2,7 @@ from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -72,8 +73,7 @@ class CollectionRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "id",
             postgresql_include=("status",),
             postgresql_where=text(
-                "finished_at IS NOT NULL "
-                "AND status IN ('succeeded', 'failed', 'canceled')"
+                "finished_at IS NOT NULL AND status IN ('succeeded', 'failed', 'canceled')"
             ),
         ),
         Index(
@@ -462,3 +462,63 @@ class DailyPriceAggregate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
     first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DailyTrendAggregate(TimestampMixin, Base):
+    """Exact daily summary of per-run minima for Dashboard-compatible filters."""
+
+    __tablename__ = "daily_trend_aggregates"
+    __table_args__ = (
+        CheckConstraint("lowest_price_minor >= 0", name="lowest_price_nonnegative"),
+        CheckConstraint(
+            "highest_price_minor >= lowest_price_minor",
+            name="valid_price_range",
+        ),
+        CheckConstraint("price_sum_minor >= 0", name="price_sum_nonnegative"),
+        CheckConstraint("sample_count > 0", name="sample_count_positive"),
+        CheckConstraint(
+            "first_observed_at <= last_observed_at",
+            name="valid_observation_range",
+        ),
+        Index(
+            "ix_daily_trend_aggregates_lookup",
+            "search_query_id",
+            "currency",
+            "direct_only",
+            "observation_date",
+            postgresql_include=(
+                "lowest_price_minor",
+                "highest_price_minor",
+                "price_sum_minor",
+                "sample_count",
+            ),
+        ),
+    )
+
+    search_query_id: Mapped[UUID] = mapped_column(
+        ForeignKey("search_queries.id", ondelete="CASCADE"), primary_key=True
+    )
+    observation_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    currency: Mapped[str] = mapped_column(String(3), primary_key=True)
+    direct_only: Mapped[bool] = mapped_column(Boolean, primary_key=True)
+    lowest_price_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    highest_price_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    price_sum_minor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sample_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DailyTrendAggregateCoverage(Base):
+    """Marks a query/day as rebuilt, including days with no detailed observations."""
+
+    __tablename__ = "daily_trend_aggregate_coverage"
+
+    search_query_id: Mapped[UUID] = mapped_column(
+        ForeignKey("search_queries.id", ondelete="CASCADE"), primary_key=True
+    )
+    observation_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    source_last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=func.now(), nullable=False
+    )

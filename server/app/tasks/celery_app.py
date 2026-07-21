@@ -10,6 +10,7 @@ celery_app = Celery(
     backend=settings.redis_url,
     include=(
         "app.tasks.collection",
+        "app.tasks.exports",
         "app.tasks.notifications",
         "app.tasks.scheduler",
     ),
@@ -27,6 +28,8 @@ celery_app.conf.update(
         "farescope.collection.maintain_partitions": {"queue": "default"},
         "farescope.alerts.evaluate_pending": {"queue": "analysis"},
         "farescope.notifications.deliver_pending": {"queue": "notifications"},
+        "farescope.exports.run": {"queue": "exports"},
+        "farescope.exports.maintain": {"queue": "default"},
     },
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -60,6 +63,10 @@ celery_app.conf.update(
         "notification-delivery": {
             "task": "farescope.notifications.deliver_pending",
             "schedule": 15,
+        },
+        "export-maintenance": {
+            "task": "farescope.exports.maintain",
+            "schedule": 30,
         },
     },
 )

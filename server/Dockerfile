@@ -40,6 +40,7 @@ RUN apt-get update \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/farescope \
         --shell /usr/sbin/nologin farescope \
     && mkdir -p /var/lib/farescope/celerybeat /var/lib/farescope/collector-artifacts \
+        /var/lib/farescope/exports \
     && chown -R 10001:10001 /var/lib/farescope
 
 WORKDIR /app

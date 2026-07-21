@@ -220,6 +220,7 @@ async def search_fares(
         request.app.state.session_factory,
         run_id=run.id,
         lease_seconds=settings.collection_dispatch_lease_seconds,
+        realtime_settings=settings,
     )
     await database.refresh(run)
 

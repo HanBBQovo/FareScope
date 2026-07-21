@@ -9,6 +9,8 @@ def test_collection_tasks_are_registered_and_routed() -> None:
     assert "farescope.collection.maintain_partitions" in celery_app.tasks
     assert "farescope.alerts.evaluate_pending" in celery_app.tasks
     assert "farescope.notifications.deliver_pending" in celery_app.tasks
+    assert "farescope.exports.run" in celery_app.tasks
+    assert "farescope.exports.maintain" in celery_app.tasks
     assert celery_app.conf.task_routes["farescope.collection.run"] == {
         "queue": "collector"
     }
@@ -25,3 +27,4 @@ def test_beat_has_scheduler_and_partition_maintenance() -> None:
     }.issubset(scheduled_tasks)
     assert "farescope.alerts.evaluate_pending" in scheduled_tasks
     assert "farescope.notifications.deliver_pending" in scheduled_tasks
+    assert "farescope.exports.maintain" in scheduled_tasks

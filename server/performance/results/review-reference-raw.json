@@ -1,0 +1,146 @@
+{
+  "cache_scope": {
+    "client_cold_probe": [],
+    "reason": "Clearing PostgreSQL shared buffers or the host page cache requires restarting or privileged cache eviction on a dedicated server. This shared local PostgreSQL was deliberately not restarted or purged.",
+    "true_postgresql_or_os_cold_cache": false,
+    "warm_runs": "PostgreSQL and OS caches are not cleared between scenarios"
+  },
+  "configuration": {
+    "api_transport": "httpx ASGITransport (full FastAPI stack, no socket/TLS)",
+    "collection_operations_api": "real auth/status/schema SQL and serialization with Redis LLEN stubbed to an immediate unavailable result",
+    "concurrency": [
+      32
+    ],
+    "daily_trend_mode": "raw",
+    "fare_search_api": "real auth/read/serialization with benchmark-only canonical-search and collector-dispatch stubs; no provider I/O",
+    "layers": [
+      "service",
+      "api"
+    ],
+    "max_overflow": 4,
+    "pool_size": 8,
+    "pool_timeout_seconds": 2.0,
+    "requests_per_scenario": 80,
+    "users": 64,
+    "warmup_requests": 4,
+    "workloads": [
+      "dashboard-100"
+    ]
+  },
+  "environment": {
+    "database_size_bytes": 419347479,
+    "database_url": "postgresql://farescope:***@127.0.0.1:5432/farescope_perf_concurrency_20260721_a",
+    "machine": {
+      "logical_cpus": 10,
+      "platform": "macOS-26.4-arm64-arm-64bit",
+      "processor": "arm"
+    },
+    "postgresql": {
+      "effective_cache_size": "4GB",
+      "max_connections": "100",
+      "random_page_cost": "4",
+      "shared_buffers": "128MB",
+      "version": "PostgreSQL 16.13 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "work_mem": "4MB"
+    },
+    "rows": {
+      "collection_runs": 7000,
+      "fare_offers": 40000,
+      "itineraries": 40000,
+      "latest_calendar_prices": 60000,
+      "price_observations": 480000,
+      "schema_observations": 200,
+      "search_queries": 2000,
+      "subscriptions": 6088,
+      "users": 500
+    },
+    "schema_revision": "20260721_0013"
+  },
+  "generated_at": "2026-07-21T02:30:33.496519+00:00",
+  "results": [
+    {
+      "concurrency": 32,
+      "duration_seconds": 4.306869,
+      "error_rate": 0.075,
+      "errors": {
+        "TimeoutError: QueuePool limit of size 8 overflow 4 reached, connection timed out, timeout 2.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)": 6
+      },
+      "failed": 6,
+      "latency_ms": {
+        "max": 2217.139,
+        "min": 369.128,
+        "p50": 1546.198,
+        "p95": 2105.144,
+        "p99": 2189.251
+      },
+      "layer": "service",
+      "pool_acquire_ms": {
+        "acquisitions": 80,
+        "max": 2084.323,
+        "min": 0.003,
+        "over_1ms": 72,
+        "p50": 868.087,
+        "p95": 2066.505,
+        "p99": 2070.462,
+        "peak_checked_out": 12
+      },
+      "requests": 80,
+      "statements": {
+        "count": 740,
+        "max": 487.673,
+        "min": 0.33,
+        "p50": 31.66,
+        "p95": 148.527,
+        "p99": 294.113,
+        "per_request": 9.25
+      },
+      "status_counts": {},
+      "succeeded": 74,
+      "throughput_rps": 18.575,
+      "workload": "dashboard-100"
+    },
+    {
+      "concurrency": 32,
+      "duration_seconds": 4.826096,
+      "error_rate": 0.025,
+      "errors": {
+        "TimeoutError: QueuePool limit of size 8 overflow 4 reached, connection timed out, timeout 2.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)": 2
+      },
+      "failed": 2,
+      "latency_ms": {
+        "max": 2595.639,
+        "min": 503.083,
+        "p50": 1740.697,
+        "p95": 2266.258,
+        "p99": 2565.496
+      },
+      "layer": "api",
+      "pool_acquire_ms": {
+        "acquisitions": 160,
+        "max": 2034.143,
+        "min": 0.004,
+        "over_1ms": 140,
+        "p50": 378.43,
+        "p95": 1237.86,
+        "p99": 1779.177,
+        "peak_checked_out": 12
+      },
+      "requests": 80,
+      "statements": {
+        "count": 860,
+        "max": 311.571,
+        "min": 0.417,
+        "p50": 30.934,
+        "p95": 120.752,
+        "p99": 221.682,
+        "per_request": 10.75
+      },
+      "status_counts": {
+        "200": 78
+      },
+      "succeeded": 78,
+      "throughput_rps": 16.577,
+      "workload": "dashboard-100"
+    }
+  ]
+}

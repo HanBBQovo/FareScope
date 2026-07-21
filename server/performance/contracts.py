@@ -123,6 +123,14 @@ CRITICAL_INDEXES: dict[str, dict[str, tuple[str, ...]]] = {
             "search_query_id",
         ),
     },
+    "daily_trend_aggregates": {
+        "ix_daily_trend_aggregates_lookup": (
+            "search_query_id",
+            "currency",
+            "direct_only",
+            "observation_date",
+        ),
+    },
     "calendar_price_observations": {
         "ix_calendar_price_observations_search_dates": (
             "search_query_id",

@@ -29,6 +29,10 @@ async def get_database_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_database_session)]
+FunctionDatabaseSession = Annotated[
+    AsyncSession,
+    Depends(get_database_session, scope="function"),
+]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
 
 

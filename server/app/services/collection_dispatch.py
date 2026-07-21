@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import CollectionRun
 from app.models.enums import CollectionStatus
+from app.services.collection_realtime import publish_collection_run_states_safely
+from app.settings import Settings, get_settings
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -162,6 +164,7 @@ async def dispatch_collection_run_safely(
     lease_seconds: int,
     publisher: Publisher | None = None,
     now: datetime | None = None,
+    realtime_settings: Settings | None = None,
 ) -> PublishResult:
     """Lease after the caller commits, publish outside a transaction, and never raise."""
 
@@ -186,10 +189,17 @@ async def dispatch_collection_run_safely(
     if not leases:
         return PublishResult(run_id=run_id, enqueued=False, error_type="run_not_pending")
 
+    runtime_settings = realtime_settings or get_settings()
+    await publish_collection_run_states_safely(
+        session_factory,
+        run_ids=tuple(lease.run_id for lease in leases),
+        settings=runtime_settings,
+    )
     results = await publish_dispatch_leases_safely(
         session_factory,
         leases,
         publisher=publisher,
+        realtime_settings=runtime_settings,
     )
     return results[0]
 
@@ -200,6 +210,7 @@ async def publish_dispatch_leases_safely(
     *,
     publisher: Publisher | None = None,
     release_delay_seconds: int = 30,
+    realtime_settings: Settings | None = None,
 ) -> tuple[PublishResult, ...]:
     """Publish already-committed leases and release broker failures without raising."""
 
@@ -226,6 +237,11 @@ async def publish_dispatch_leases_safely(
                 now=datetime.now(UTC),
                 retry_delay_seconds=release_delay_seconds,
             )
+        await publish_collection_run_states_safely(
+            session_factory,
+            run_ids=tuple(lease.run_id for lease in failed_leases),
+            settings=realtime_settings or get_settings(),
+        )
     except Exception as exc:  # noqa: BLE001 - leases expire and scheduler recovery remains valid
         logger.warning(
             "collection dispatch lease release failed",

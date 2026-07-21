@@ -155,6 +155,7 @@ async def maintain_observation_partition_lifecycle(
     archive_after_months: int | None = 24,
     purge_after_months: int | None = None,
     max_actions: int = 2,
+    protected_export_ranges: tuple[tuple[datetime, datetime], ...] = (),
 ) -> tuple[PartitionLifecycleAction, ...]:
     """Archive old hot partitions and optionally purge older archived partitions.
 
@@ -193,6 +194,11 @@ async def maintain_observation_partition_lifecycle(
         for partition_month, parent, name in purge_candidates:
             if len(actions) >= max_actions:
                 return tuple(actions)
+            if parent == "price_observations" and _partition_month_overlaps_ranges(
+                partition_month,
+                protected_export_ranges,
+            ):
+                continue
             await _purge_archived_partition(connection, name)
             actions.append(
                 PartitionLifecycleAction(
@@ -233,6 +239,29 @@ def partition_month_from_name(name: str) -> date:
     if match is None:
         raise ValueError("unrecognized observation partition name")
     return date(int(match.group(2)), int(match.group(3)), 1)
+
+
+def _partition_month_overlaps_ranges(
+    partition_month: date,
+    ranges: tuple[tuple[datetime, datetime], ...],
+) -> bool:
+    partition_end_month = shift_month(partition_month, 1)
+    partition_start = datetime(
+        partition_month.year,
+        partition_month.month,
+        1,
+        tzinfo=UTC,
+    )
+    partition_end = datetime(
+        partition_end_month.year,
+        partition_end_month.month,
+        1,
+        tzinfo=UTC,
+    )
+    return any(
+        range_start < partition_end and range_end > partition_start
+        for range_start, range_end in ranges
+    )
 
 
 async def _list_attached_observation_partitions(

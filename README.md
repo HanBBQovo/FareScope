@@ -21,7 +21,11 @@ The core product runs locally end to end:
 - async FastAPI, Celery process isolation, PostgreSQL partitions/snapshots, Redis, and production
   PgBouncer topology;
 - collection queue/run/schema operations views, bounded two-stage partition archive maintenance,
-  keyset pagination, readiness, request IDs, and reproducible PostgreSQL concurrency workloads.
+  authenticated Redis Streams collection updates with polling fallback, keyset pagination,
+  readiness, request IDs, and reproducible PostgreSQL concurrency workloads.
+- owner-scoped background CSV/JSON exports with durable progress, bounded retries, hot/archive
+  snapshot-fenced history merging, global disk reservations, download expiry, and a persistent
+  shared file volume.
 
 The latest live `SHA-TYO` round-trip run stored 1,130 latest calendar snapshots. Ctrip returned no
 detailed offers for that sample after three bounded attempts, so FareScope reports a visible
@@ -29,10 +33,10 @@ detailed offers for that sample after three bounded attempts, so FareScope repor
 covered by redacted one-way/round-trip fixtures and have also been observed on another live route.
 
 Reference concurrency is measured and the 100-route dashboard no longer times out at 32 concurrent
-API requests. A 1.44-million-observation run still exposed one service-layer pool timeout and raw
-trend growth, so the 14.4-million profile, true cold-cache testing, target-server egress, exports,
-archived-data access, and history-dependent predictions remain open. The authoritative evidence and
-checklist are in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
+API requests. A 1.44-million-observation run still exposed one service-layer pool timeout, so the
+14.4-million profile, true cold-cache testing, target-server egress, and history-dependent
+predictions remain open. The authoritative evidence and checklist are in
+[docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
 
 ## Repository layout
 
@@ -85,6 +89,9 @@ cd server
 uv run celery -A app.tasks.celery_app:celery_app worker \
   --queues=default,analysis,notifications --loglevel=INFO
 
+uv run celery -A app.tasks.celery_app:celery_app worker \
+  --queues=exports --concurrency=1 --loglevel=INFO
+
 uv run --extra collector celery -A app.tasks.celery_app:celery_app worker \
   --queues=collector --concurrency=1 --loglevel=INFO
 
@@ -106,6 +113,10 @@ Open <http://localhost:5278/> and register with a username plus a password of at
 No email is required. Liveness is `GET /api/health/live`; dependency-aware readiness is
 `GET /api/health/ready`.
 
+The History page can create owner-scoped CSV or JSON exports for a subscription and UTC date range.
+The API returns immediately; the Celery worker writes the file in the background. The local example
+stores generated files under `server/data/exports`, which is ignored by Git.
+
 ## Verification
 
 ```bash
@@ -115,10 +126,15 @@ uv run pytest -q
 FARESCOPE_TEST_DATABASE_URL=postgresql+asyncpg://farescope:farescope@127.0.0.1:5432/farescope \
   uv run pytest -q
 FARESCOPE_TEST_REDIS_URL=redis://127.0.0.1:6379/0 \
-  uv run pytest -q tests/collectors/runtime/test_redis_gate_integration.py
+  uv run pytest -q tests/collectors/runtime/test_redis_gate_integration.py \
+    tests/services/test_collection_realtime_redis.py
+FARESCOPE_TEST_DATABASE_URL=postgresql+asyncpg://farescope:farescope@127.0.0.1:5432/farescope \
+FARESCOPE_TEST_REDIS_URL=redis://127.0.0.1:6379/0 \
+  uv run pytest -q tests/api/test_realtime_end_to_end_postgres_redis.py
 uv run alembic check
 
 cd ../web
+npm run test:realtime
 npm run lint
 npm run build
 

@@ -22,6 +22,7 @@ class SchedulerPlan:
     recovered_run_count: int
     exhausted_run_count: int
     dispatch_leases: tuple[DispatchLease, ...]
+    state_changed_run_ids: tuple[UUID, ...]
     maintained_partition_count: int
 
 
@@ -41,7 +42,7 @@ async def plan_scheduler_tick(
     if schedule_bucket_seconds < 1:
         raise ValueError("schedule bucket must be positive")
 
-    recovered_count, exhausted_count = await _recover_expired_leases(
+    recovered_run_ids, exhausted_count = await _recover_expired_leases(
         session,
         now=now,
         limit=dispatch_batch_size,
@@ -64,7 +65,7 @@ async def plan_scheduler_tick(
     for subscription in due_subscriptions:
         grouped[subscription.search_query_id].append(subscription)
 
-    created_count = await _ensure_grouped_collection_runs(
+    created_run_ids = await _ensure_grouped_collection_runs(
         session,
         grouped=grouped,
         now=now,
@@ -87,10 +88,15 @@ async def plan_scheduler_tick(
     return SchedulerPlan(
         due_subscription_count=len(due_subscriptions),
         grouped_query_count=len(grouped),
-        created_run_count=created_count,
-        recovered_run_count=recovered_count,
+        created_run_count=len(created_run_ids),
+        recovered_run_count=len(recovered_run_ids),
         exhausted_run_count=exhausted_count,
         dispatch_leases=dispatch_leases,
+        state_changed_run_ids=tuple(
+            dict.fromkeys(
+                (*created_run_ids, *recovered_run_ids, *(lease.run_id for lease in dispatch_leases))
+            )
+        ),
         maintained_partition_count=0,
     )
 
@@ -130,9 +136,9 @@ async def _ensure_grouped_collection_runs(
     grouped: dict[UUID, list[Subscription]],
     now: datetime,
     schedule_bucket_seconds: int,
-) -> int:
+) -> tuple[UUID, ...]:
     if not grouped:
-        return 0
+        return ()
 
     query_ids = tuple(grouped)
     queries = (
@@ -166,7 +172,7 @@ async def _ensure_grouped_collection_runs(
             )
         ).all()
     )
-    created_count = 0
+    created_run_ids: list[UUID] = []
     for search_query_id in query_ids:
         if search_query_id in active_query_ids:
             continue
@@ -203,8 +209,8 @@ async def _ensure_grouped_collection_runs(
         )
         inserted = (await session.execute(statement)).scalar_one_or_none()
         if inserted is not None:
-            created_count += 1
-    return created_count
+            created_run_ids.append(inserted)
+    return tuple(created_run_ids)
 
 
 async def _recover_expired_leases(
@@ -212,7 +218,7 @@ async def _recover_expired_leases(
     *,
     now: datetime,
     limit: int,
-) -> tuple[int, int]:
+) -> tuple[tuple[UUID, ...], int]:
     expired_runs = (
         await session.scalars(
             select(CollectionRun)
@@ -256,4 +262,4 @@ async def _recover_expired_leases(
         run.finished_at = None
         run.error_code = None
         run.error_message = None
-    return len(expired_runs), exhausted_count
+    return tuple(run.id for run in expired_runs), exhausted_count

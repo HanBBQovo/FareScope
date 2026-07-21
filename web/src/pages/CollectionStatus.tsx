@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Clock3, ListTree, RefreshCw, ShieldAlert } from 'lucide-react'
 
@@ -20,6 +20,7 @@ import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTit
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { formatDateTime, formatPercent } from '@/lib/formatters'
+import { useCollectionRealtime } from '@/lib/use-collection-realtime'
 
 const statusMeta: Record<CollectionRunStatus, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline'; icon: typeof CheckCircle2 }> = {
   success: { label: '成功', variant: 'secondary', icon: CheckCircle2 },
@@ -30,17 +31,22 @@ const statusMeta: Record<CollectionRunStatus, { label: string; variant: 'default
 
 export default function CollectionStatus() {
   const [selectedRun, setSelectedRun] = useState<CollectionRun | null>(null)
+  const queryClient = useQueryClient()
+  const realtime = useCollectionRealtime(() => {
+    queryClient.invalidateQueries({ queryKey: fareQueryKeys.collectionRuns() })
+    queryClient.invalidateQueries({ queryKey: fareQueryKeys.collectionOperations() })
+  })
   const runs = useInfiniteQuery({
     queryKey: fareQueryKeys.collectionRuns(),
     queryFn: ({ pageParam }) => getCollectionRuns(typeof pageParam === 'string' ? pageParam : undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.hasMore ? lastPage.nextCursor || undefined : undefined,
-    refetchInterval: 30_000,
+    refetchInterval: realtime.status === 'connected' ? 60_000 : 20_000,
   })
   const operations = useQuery({
     queryKey: fareQueryKeys.collectionOperations(),
     queryFn: getCollectionOperations,
-    refetchInterval: 15_000,
+    refetchInterval: realtime.status === 'connected' ? 60_000 : 20_000,
   })
   const runPages = useMemo(() => runs.data?.pages || [], [runs.data?.pages])
   const latestPage = runPages[0]

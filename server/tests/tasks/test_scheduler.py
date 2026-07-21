@@ -66,7 +66,19 @@ async def test_partition_task_uses_lock_and_maintains_both_tables(
             ),
         )
     )
-    monkeypatch.setattr(scheduler_tasks, "_try_transaction_lock", try_lock)
+    active_ranges = AsyncMock(
+        return_value=(
+            (
+                datetime(2024, 1, 1, tzinfo=UTC),
+                datetime(2024, 2, 1, tzinfo=UTC),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        scheduler_tasks,
+        "try_acquire_observation_partition_exclusive_lock",
+        try_lock,
+    )
     monkeypatch.setattr(
         scheduler_tasks,
         "ensure_all_observation_partitions",
@@ -76,6 +88,11 @@ async def test_partition_task_uses_lock_and_maintains_both_tables(
         scheduler_tasks,
         "maintain_observation_partition_lifecycle",
         maintain_lifecycle,
+    )
+    monkeypatch.setattr(
+        scheduler_tasks,
+        "list_active_export_ranges",
+        active_ranges,
     )
 
     result = await scheduler_tasks.maintain_observation_partitions(
@@ -93,17 +110,24 @@ async def test_partition_task_uses_lock_and_maintains_both_tables(
             "month": "2024-01-01",
         }
     ]
-    try_lock.assert_awaited_once_with(session, scheduler_tasks._PARTITION_LOCK_ID)
+    try_lock.assert_awaited_once_with(session)
     ensure_partitions.assert_awaited_once_with(
         session.connection_value,
         reference=datetime(2026, 7, 20, tzinfo=UTC),
     )
+    active_ranges.assert_awaited_once_with(session)
     maintain_lifecycle.assert_awaited_once_with(
         session.connection_value,
         reference=datetime(2026, 7, 20, tzinfo=UTC),
         archive_after_months=24,
         purge_after_months=None,
         max_actions=2,
+        protected_export_ranges=(
+            (
+                datetime(2024, 1, 1, tzinfo=UTC),
+                datetime(2024, 2, 1, tzinfo=UTC),
+            ),
+        ),
     )
 
 
@@ -114,7 +138,7 @@ async def test_partition_task_skips_when_another_instance_holds_lock(
     session = _SessionContext()
     monkeypatch.setattr(
         scheduler_tasks,
-        "_try_transaction_lock",
+        "try_acquire_observation_partition_exclusive_lock",
         AsyncMock(return_value=False),
     )
     ensure_partitions = AsyncMock()
@@ -129,6 +153,12 @@ async def test_partition_task_skips_when_another_instance_holds_lock(
         "maintain_observation_partition_lifecycle",
         maintain_lifecycle,
     )
+    active_ranges = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_tasks,
+        "list_active_export_ranges",
+        active_ranges,
+    )
 
     result = await scheduler_tasks.maintain_observation_partitions(
         session_factory=lambda: session,  # type: ignore[arg-type]
@@ -137,3 +167,4 @@ async def test_partition_task_skips_when_another_instance_holds_lock(
     assert result == {"status": "skipped", "reason": "partition_lock_busy"}
     ensure_partitions.assert_not_awaited()
     maintain_lifecycle.assert_not_awaited()
+    active_ranges.assert_not_awaited()

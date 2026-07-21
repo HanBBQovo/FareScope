@@ -213,6 +213,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--max-overflow", type=int, default=4)
     parser.add_argument("--pool-timeout-seconds", type=float, default=2.0)
     parser.add_argument(
+        "--daily-trend-mode",
+        choices=("aggregate", "raw"),
+        default="aggregate",
+        help="Use maintained daily aggregates or force the exact raw Dashboard trend path.",
+    )
+    parser.add_argument(
         "--client-cold-probe",
         action="store_true",
         help="Compare the first and second service call on a fresh client pool.",
@@ -501,6 +507,7 @@ def _service_call(
     *,
     factory: async_sessionmaker[AsyncSession],
     users: tuple[BenchmarkUser, ...],
+    daily_trend_mode: str,
 ) -> Callable[[int], Awaitable[int | None]]:
     async def call(request_number: int) -> int | None:
         user = users[0] if workload == "dashboard-100" else _user_for_request(users, request_number)
@@ -510,7 +517,12 @@ def _service_call(
             if workload == "dashboard-100":
                 contexts = await _load_contexts(session, user_id=user.user_id)
                 await load_subscription_latest_fares(session, contexts=contexts)
-                await load_dashboard_price_analytics(session, contexts=contexts, as_of=now)
+                await load_dashboard_price_analytics(
+                    session,
+                    contexts=contexts,
+                    as_of=now,
+                    use_daily_aggregates=daily_trend_mode == "aggregate",
+                )
                 await load_dashboard_subscription_stats(session, user_id=user.user_id)
                 await load_collection_health(session, user_id=user.user_id, now=now)
             elif workload == "fare-search":
@@ -817,6 +829,23 @@ async def _stub_queue_depths():
         collection_operations.load_queue_depths = original
 
 
+@asynccontextmanager
+async def _configured_api_daily_trend_mode(mode: str):
+    import app.api.routes.fares as fares_routes
+
+    original = fares_routes.load_dashboard_price_analytics
+
+    async def configured(*args: object, **kwargs: object):
+        kwargs["use_daily_aggregates"] = mode == "aggregate"
+        return await original(*args, **kwargs)
+
+    fares_routes.load_dashboard_price_analytics = configured
+    try:
+        yield
+    finally:
+        fares_routes.load_dashboard_price_analytics = original
+
+
 async def _service_matrix(
     *,
     database_url: str,
@@ -828,6 +857,7 @@ async def _service_matrix(
     pool_size: int,
     max_overflow: int,
     pool_timeout_seconds: float,
+    daily_trend_mode: str,
 ) -> list[ScenarioResult]:
     from app.db import create_engine, create_session_factory
 
@@ -843,7 +873,12 @@ async def _service_matrix(
     results: list[ScenarioResult] = []
     try:
         for workload in workloads:
-            call = _service_call(workload, factory=factory, users=users)
+            call = _service_call(
+                workload,
+                factory=factory,
+                users=users,
+                daily_trend_mode=daily_trend_mode,
+            )
             for concurrency in concurrency_levels:
                 result = await _run_scenario(
                     layer="service",
@@ -873,6 +908,7 @@ async def _api_matrix(
     pool_size: int,
     max_overflow: int,
     pool_timeout_seconds: float,
+    daily_trend_mode: str,
 ) -> list[ScenarioResult]:
     os.environ["FARESCOPE_DATABASE_URL"] = to_sqlalchemy_url(database_url)
     os.environ["FARESCOPE_DATABASE_POOL_SIZE"] = str(pool_size)
@@ -890,7 +926,11 @@ async def _api_matrix(
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
         async with httpx.AsyncClient(transport=transport, base_url="http://benchmark") as client:
             target_context = _context_for_calendar(users[0])
-            async with _stub_fare_collection(target_context), _stub_queue_depths():
+            async with (
+                _stub_fare_collection(target_context),
+                _stub_queue_depths(),
+                _configured_api_daily_trend_mode(daily_trend_mode),
+            ):
                 for workload in workloads:
                     async def call(request_number: int, workload: str = workload) -> int:
                         user = (
@@ -931,6 +971,7 @@ async def _client_cold_probe(
     pool_size: int,
     max_overflow: int,
     pool_timeout_seconds: float,
+    daily_trend_mode: str,
 ) -> list[dict[str, object]]:
     from app.db import create_engine, create_session_factory
 
@@ -945,7 +986,12 @@ async def _client_cold_probe(
         )
         metrics = EngineMetrics(engine)
         factory = create_session_factory(engine)
-        call = _service_call(workload, factory=factory, users=users)
+        call = _service_call(
+            workload,
+            factory=factory,
+            users=users,
+            daily_trend_mode=daily_trend_mode,
+        )
         try:
             first_started = time.perf_counter()
             await call(0)
@@ -1084,6 +1130,7 @@ async def main() -> None:
             pool_size=arguments.pool_size,
             max_overflow=arguments.max_overflow,
             pool_timeout_seconds=arguments.pool_timeout_seconds,
+            daily_trend_mode=arguments.daily_trend_mode,
         )
 
     results: list[ScenarioResult] = []
@@ -1099,6 +1146,7 @@ async def main() -> None:
                 pool_size=arguments.pool_size,
                 max_overflow=arguments.max_overflow,
                 pool_timeout_seconds=arguments.pool_timeout_seconds,
+                daily_trend_mode=arguments.daily_trend_mode,
             )
         )
     if "api" in layers:
@@ -1113,11 +1161,13 @@ async def main() -> None:
                 pool_size=arguments.pool_size,
                 max_overflow=arguments.max_overflow,
                 pool_timeout_seconds=arguments.pool_timeout_seconds,
+                daily_trend_mode=arguments.daily_trend_mode,
             )
         )
 
     output = arguments.output or Path("performance/results") / (
-        f"concurrency-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+        f"concurrency-{arguments.daily_trend_mode}-"
+        f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
     )
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -1132,6 +1182,7 @@ async def main() -> None:
             "pool_size": arguments.pool_size,
             "max_overflow": arguments.max_overflow,
             "pool_timeout_seconds": arguments.pool_timeout_seconds,
+            "daily_trend_mode": arguments.daily_trend_mode,
             "api_transport": "httpx ASGITransport (full FastAPI stack, no socket/TLS)",
             "fare_search_api": (
                 "real auth/read/serialization with benchmark-only canonical-search and "

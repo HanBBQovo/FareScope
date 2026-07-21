@@ -11,6 +11,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BRAND_NAME } from '@/config'
+import { replaceIdentityCache } from '@/lib/identity-cache'
 
 type AuthMode = 'login' | 'register'
 
@@ -60,7 +61,7 @@ export default function Login() {
       const nextSession = isRegister
         ? await register(normalizedUsername, password)
         : await login(normalizedUsername, password)
-      queryClient.setQueryData(sessionQueryKey, nextSession)
+      replaceIdentityCache(queryClient, sessionQueryKey, nextSession)
       navigate(from, { replace: true })
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : `${isRegister ? '注册' : '登录'}失败`)
