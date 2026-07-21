@@ -38,12 +38,15 @@ class Settings(BaseSettings):
     notification_delivery_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     notification_delivery_stale_seconds: int = Field(default=900, ge=60, le=86_400)
     collector_proxy_server: str | None = None
-    collector_browser_channel: Literal["chrome"] | None = None
+    # Standard Chrome is the verified provider path; Chromium remains an explicit fallback.
+    collector_browser_channel: Literal["chrome"] | None = "chrome"
+    collector_browser_headless: bool = False
+    collector_browser_background: bool = True
     collection_screenshot_directory: str | None = None
     collection_dispatch_lease_seconds: int = Field(default=120, ge=30, le=3600)
     collection_run_lease_seconds: int = Field(default=900, ge=60, le=7200)
-    collection_retry_base_seconds: int = Field(default=60, ge=5, le=3600)
-    collection_retry_max_seconds: int = Field(default=1800, ge=30, le=21600)
+    collection_retry_base_seconds: int = Field(default=300, ge=5, le=3600)
+    collection_retry_max_seconds: int = Field(default=3600, ge=30, le=21600)
     collection_retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
     collection_coordination_backend: Literal["local", "redis"] = "local"
     collection_coordination_lease_ttl_seconds: float = Field(default=180, ge=150, le=3600)
@@ -60,11 +63,11 @@ class Settings(BaseSettings):
         max_length=80,
         pattern=r"^[A-Za-z0-9:_-]+$",
     )
-    collection_provider_concurrency: int = Field(default=2, ge=1, le=32)
+    collection_provider_concurrency: int = Field(default=1, ge=1, le=32)
     collection_route_concurrency: int = Field(default=1, ge=1, le=8)
-    collection_minimum_interval_seconds: float = Field(default=3.0, ge=0, le=3600)
-    collection_jitter_seconds: float = Field(default=1.0, ge=0, le=3600)
-    collection_capture_settle_seconds: float = Field(default=2.0, ge=0, le=30)
+    collection_minimum_interval_seconds: float = Field(default=30.0, ge=0, le=3600)
+    collection_jitter_seconds: float = Field(default=15.0, ge=0, le=3600)
+    collection_capture_settle_seconds: float = Field(default=5.0, ge=0, le=30)
     collection_scheduler_tick_seconds: int = Field(default=30, ge=5, le=3600)
     collection_scheduler_subscription_batch_size: int = Field(default=500, ge=1, le=5000)
     collection_scheduler_dispatch_batch_size: int = Field(default=100, ge=1, le=1000)

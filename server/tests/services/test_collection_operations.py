@@ -6,6 +6,7 @@ from app.api.routes.fares import _run_diagnostics
 from app.models import CollectionRun
 from app.services import collection_operations
 from app.services.collection_operations import extract_top_level_fields, load_queue_depths
+from app.services.collection_persistence import _safe_diagnostic
 
 
 class _FakePipeline:
@@ -79,6 +80,35 @@ def test_run_diagnostics_keep_parse_and_failure_evidence_bounded_and_typed() -> 
     assert diagnostics[0].observed_type == "null"
     assert diagnostics[1].severity == "error"
     assert diagnostics[1].retryable is True
+
+
+def test_safe_diagnostic_keeps_browser_cause_without_provider_payload() -> None:
+    diagnostic = _safe_diagnostic(
+        {
+            "kind": "navigation_error",
+            "message": "Browser collection run failed",
+            "details": {
+                "browser_channel": "chrome",
+                "headless": False,
+                "background": True,
+                "browser_mode": "headed_background",
+                "exception_type": "Error",
+                "page_url": "https://example.invalid/secret?token=redacted",
+            },
+        }
+    )
+
+    assert diagnostic == {
+        "kind": "navigation_error",
+        "message": "Browser collection run failed",
+        "details": {
+            "browser_channel": "chrome",
+            "headless": "False",
+            "background": "True",
+            "browser_mode": "headed_background",
+            "exception_type": "Error",
+        },
+    }
 
 
 @pytest.mark.asyncio

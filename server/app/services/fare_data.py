@@ -54,6 +54,7 @@ from app.models import (
     SubscriptionFilter,
 )
 from app.models.enums import CollectionStatus
+from app.services.collection_visibility import visible_collection_run_condition
 
 HistoryResolution = Literal["raw", "hour", "day"]
 
@@ -652,15 +653,12 @@ async def load_collection_health(
 ) -> CollectionHealthStats:
     """Calculate health over all of the owner's routes, not just the visible run page."""
 
-    query_ids = select(Subscription.search_query_id).where(
-        Subscription.user_id == user_id,
-        Subscription.enabled.is_(True),
-    )
+    visible_runs = visible_collection_run_condition(user_id, enabled_subscriptions=True)
     day_ago = now - timedelta(hours=24)
     last_success_at = await session.scalar(
         select(CollectionRun.finished_at)
         .where(
-            CollectionRun.search_query_id.in_(query_ids),
+            visible_runs,
             CollectionRun.status == CollectionStatus.SUCCEEDED.value,
             CollectionRun.finished_at.is_not(None),
             CollectionRun.finished_at <= now,
@@ -678,7 +676,7 @@ async def load_collection_health(
                 .label("successful_24h"),
                 func.count().label("terminal_24h"),
             ).where(
-                CollectionRun.search_query_id.in_(query_ids),
+                visible_runs,
                 CollectionRun.status.in_(
                     (
                         CollectionStatus.SUCCEEDED.value,

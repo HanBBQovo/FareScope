@@ -13,7 +13,7 @@ is still the fastest way to run Postgres and Redis during development.
 | `worker` | Celery analysis/notification/default queues | backend + egress |
 | `export-worker` | Bounded CSV/JSON generation on the shared export volume | backend |
 | `scheduler` | Celery Beat due-work dispatcher | backend only |
-| `collector` | Dedicated headed Google Chrome/Xvfb Celery worker | backend + egress |
+| `collector` | Dedicated standard Google Chrome/Xvfb Celery worker | backend + egress |
 | `migrate` | One-shot Alembic migration before app startup | backend only |
 | `pgbouncer` | Transaction-pooling connection budget | backend only |
 | `postgres` | Durable relational store | backend only |

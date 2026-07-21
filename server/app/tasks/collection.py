@@ -1,4 +1,4 @@
-"""Celery entry point for one headed-browser collection run."""
+"""Celery entry point for one browser collection run."""
 
 from __future__ import annotations
 
@@ -167,6 +167,8 @@ async def run_collection_once(
                     dispatch_token=dispatch_token,
                     lease_seconds=runtime_settings.collection_run_lease_seconds,
                     browser_channel=runtime_settings.collector_browser_channel,
+                    browser_headless=runtime_settings.collector_browser_headless,
+                    browser_background=runtime_settings.collector_browser_background,
                 )
             await publish_committed_state(run_id)
         except CollectionRunUnavailableError as exc:
@@ -216,6 +218,8 @@ async def run_collection_once(
                         expected_capture_names=_EXPECTED_CAPTURES,
                         proxy_server=resolved_proxy,
                         browser_channel=runtime_settings.collector_browser_channel,
+                        headless=runtime_settings.collector_browser_headless,
+                        background=runtime_settings.collector_browser_background,
                         screenshot_directory=screenshot_directory,
                         post_capture_settle_seconds=(
                             runtime_settings.collection_capture_settle_seconds
@@ -254,7 +258,7 @@ async def run_collection_once(
                 "error_code": "collector_runtime_error",
             }
 
-        if not browser_result.success:
+        if not browser_result.success and not browser_result.captures:
             failure = _primary_failure(browser_result)
             try:
                 async with session_factory() as session, session.begin():
@@ -334,43 +338,49 @@ async def run_collection_once(
                         finished_at=browser_result.finished_at,
                     )
                     final_status = CollectionStatus.FAILED.value
-                elif _requires_detail_retry(persistence):
-                    run.upstream_status = "partial_fare_data"
-                    run.error_code = "partial_fare_data"
-                    run.error_message = (
-                        "Calendar prices were captured but no detailed fare offers were available"
+                elif not browser_result.success or _requires_detail_retry(persistence):
+                    capture_diagnostics = [
+                        _diagnostic_payload(item) for item in browser_result.diagnostics
+                    ]
+                    existing_diagnostics = (run.run_metadata or {}).get("diagnostics")
+                    combined_diagnostics = (
+                        list(existing_diagnostics)
+                        if isinstance(existing_diagnostics, list)
+                        else []
                     )
+                    combined_diagnostics.extend(capture_diagnostics)
+                    missing_captures = sorted(browser_result.missing_capture_names)
+                    run.upstream_status = "success_with_warnings"
                     run.run_metadata = {
                         **(run.run_metadata or {}),
+                        "diagnostics": combined_diagnostics[-100:],
                         "partial_data": {
                             "calendar_count": persistence.calendar_count,
                             "itinerary_count": persistence.itinerary_count,
                             "offer_count": persistence.offer_count,
                             "price_observation_count": persistence.price_observation_count,
-                            "retryable": run.attempt < run.max_attempts,
+                            "missing_captures": missing_captures,
+                            "retryable": any(
+                                item.retryable for item in browser_result.diagnostics
+                            ),
+                            "message": (
+                                "Available fare data was preserved while some provider "
+                                "responses were unavailable"
+                                if missing_captures
+                                else "Calendar prices were captured but no detailed fare "
+                                "offers were available"
+                            ),
                         },
                     }
                     _clear_lease(run)
-                    retry_at = _schedule_retry_if_eligible(
-                        run,
-                        retryable=True,
-                        failed_at=browser_result.finished_at,
-                        base_seconds=runtime_settings.collection_retry_base_seconds,
-                        maximum_seconds=runtime_settings.collection_retry_max_seconds,
-                        jitter_ratio=runtime_settings.collection_retry_jitter_ratio,
+                    await finalize_collection_success(
+                        session,
+                        run=run,
+                        search_query=search_query,
+                        result=persistence,
+                        finished_at=browser_result.finished_at,
                     )
-                    if retry_at is None:
-                        run.upstream_status = "success_with_warnings"
-                        await finalize_collection_success(
-                            session,
-                            run=run,
-                            search_query=search_query,
-                            result=persistence,
-                            finished_at=browser_result.finished_at,
-                        )
-                        final_status = CollectionStatus.SUCCEEDED.value
-                    else:
-                        final_status = CollectionStatus.PENDING.value
+                    final_status = CollectionStatus.SUCCEEDED.value
                 else:
                     run.upstream_status = (
                         "success_with_warnings" if persistence.diagnostics else "success"
@@ -446,6 +456,8 @@ async def _claim_collection_run(
     dispatch_token: str | None,
     lease_seconds: int,
     browser_channel: str | None = None,
+    browser_headless: bool = False,
+    browser_background: bool = True,
 ) -> CollectionClaim:
     now = datetime.now(UTC)
     if lease_seconds < 1:
@@ -509,6 +521,15 @@ async def _claim_collection_run(
             "route_key": route_key,
             "expected_captures": sorted(_EXPECTED_CAPTURES),
             "browser_channel": browser_channel or "chromium",
+            "headless": browser_headless,
+            "background": browser_background,
+            "browser_mode": (
+                "headless"
+                if browser_headless
+                else "headed_background"
+                if browser_background
+                else "headed"
+            ),
         },
     }
     await session.flush()
@@ -778,7 +799,13 @@ def _diagnostic_payload(value: CaptureDiagnostic) -> dict[str, Any]:
     }
     safe_details = {
         key: value.details[key]
-        for key in ("browser_channel", "exception_type")
+        for key in (
+            "browser_channel",
+            "headless",
+            "background",
+            "browser_mode",
+            "exception_type",
+        )
         if key in value.details
     }
     if safe_details:

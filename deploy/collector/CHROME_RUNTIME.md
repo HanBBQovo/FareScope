@@ -20,12 +20,17 @@ Use the values in `deploy/production.env` (copied from the example):
 ```dotenv
 FARESCOPE_COLLECTOR_IMAGE_TARGET=collector-runtime
 FARESCOPE_COLLECTOR_BROWSER_CHANNEL=chrome
+FARESCOPE_COLLECTOR_BROWSER_HEADLESS=false
+FARESCOPE_COLLECTOR_BROWSER_BACKGROUND=true
 ```
 
 The image build runs `playwright install --with-deps chrome` and verifies that
 the `google-chrome` executable responds to `--version`. At container startup,
-the entrypoint performs a metadata-only executable check and a headed
-`about:blank` browser smoke test under Xvfb before starting the Celery worker.
+the entrypoint performs a metadata-only executable check and an `about:blank`
+browser smoke test inside Xvfb before starting the Celery worker. Xvfb keeps the
+verified headed browser kernel off the server desktop. On macOS development,
+`BACKGROUND=true` starts a separate hidden Chrome instance with a fresh temporary
+profile and terminates it when the run finishes.
 The smoke test does not open a provider page, use cookies, mount a profile, or
 write response payloads.
 
@@ -53,7 +58,7 @@ normalization pipeline for that host.
 The collector healthcheck combines three signals:
 
 1. The selected browser executable is present.
-2. The startup smoke marker proves a headed browser launched under Xvfb.
+2. The startup smoke marker proves the selected browser mode launched.
 3. Celery responds to a worker ping on the collector queue.
 
 For a manual, metadata-only check inside a running container:
@@ -63,18 +68,20 @@ docker compose --env-file deploy/production.env \
   -f compose.production.yaml exec collector \
   python /app/scripts/collector/runtime_smoke.py doctor \
   --browser-channel "$FARESCOPE_COLLECTOR_BROWSER_CHANNEL" \
+  --headed \
   --skip-display-check
 ```
 
-To verify headed launch without provider traffic, run the browser smoke command
-under the same Xvfb wrapper used by the image:
+To verify browser launch without provider traffic, use the same Xvfb wrapper as
+the collector entrypoint:
 
 ```bash
 docker compose --env-file deploy/production.env \
   -f compose.production.yaml exec collector \
   xvfb-run -a --server-args="-screen 0 1440x900x24 -nolisten tcp" \
   python /app/scripts/collector/runtime_smoke.py browser-smoke \
-  --browser-channel "$FARESCOPE_COLLECTOR_BROWSER_CHANNEL"
+  --browser-channel "$FARESCOPE_COLLECTOR_BROWSER_CHANNEL" \
+  --headed
 ```
 
 Provider capture is a separate opt-in check. A successful local smoke test does
@@ -93,13 +100,13 @@ FARESCOPE_COLLECTION_COORDINATION_ACQUIRE_TIMEOUT_SECONDS=120
 FARESCOPE_COLLECTION_COORDINATION_POLL_INTERVAL_SECONDS=0.5
 FARESCOPE_COLLECTION_COORDINATION_REDIS_TIMEOUT_SECONDS=2
 FARESCOPE_COLLECTION_COORDINATION_KEY_PREFIX=farescope:collection-coordination
-FARESCOPE_COLLECTION_PROVIDER_CONCURRENCY=2
+FARESCOPE_COLLECTION_PROVIDER_CONCURRENCY=1
 FARESCOPE_COLLECTION_ROUTE_CONCURRENCY=1
-FARESCOPE_COLLECTION_MINIMUM_INTERVAL_SECONDS=3
-FARESCOPE_COLLECTION_JITTER_SECONDS=1
-FARESCOPE_COLLECTION_CAPTURE_SETTLE_SECONDS=2
-FARESCOPE_COLLECTION_RETRY_BASE_SECONDS=60
-FARESCOPE_COLLECTION_RETRY_MAX_SECONDS=1800
+FARESCOPE_COLLECTION_MINIMUM_INTERVAL_SECONDS=30
+FARESCOPE_COLLECTION_JITTER_SECONDS=15
+FARESCOPE_COLLECTION_CAPTURE_SETTLE_SECONDS=5
+FARESCOPE_COLLECTION_RETRY_BASE_SECONDS=300
+FARESCOPE_COLLECTION_RETRY_MAX_SECONDS=3600
 FARESCOPE_COLLECTION_RETRY_JITTER_RATIO=0.2
 ```
 
@@ -144,10 +151,12 @@ retryable coordination error.
 
 The browser waits for the first required response set and then keeps the page
 open for `CAPTURE_SETTLE_SECONDS` so delayed `/search/pull/` responses can
-replace an empty envelope with a richer detailed response. A calendar-only run
-is persisted as partial data and returned to the durable retry schedule. Retry
-backoff is bounded by `RETRY_MAX_SECONDS` and receives the configured bounded
-jitter, so simultaneous failures do not all retry at one instant.
+replace an empty envelope with a richer detailed response. A bounded CDP buffer
+keeps large matched round-trip responses from being evicted before parsing; raw
+bodies remain in memory and are not written to disk. Calendar-only data is still
+persisted as a successful partial result. Retry backoff is bounded by
+`RETRY_MAX_SECONDS` and receives configured jitter, so simultaneous failures do
+not all retry at one instant.
 
 Never mount a personal Chrome profile, cookie store, or browser cache into the
 collector. Keep optional failure screenshots outside the repository and give

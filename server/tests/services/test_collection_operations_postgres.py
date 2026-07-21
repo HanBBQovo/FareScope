@@ -61,7 +61,8 @@ async def test_operations_counts_are_owner_scoped_and_schema_summary_is_redacted
             other = _user(f"ops-other-{token}")
             owner_query = _query(f"{token}a")
             other_query = _query(f"{token}b")
-            session.add_all([owner, other, owner_query, other_query])
+            explorer_query = _query(f"{token}c")
+            session.add_all([owner, other, owner_query, other_query, explorer_query])
             await session.flush()
             session.add_all(
                 [
@@ -120,7 +121,19 @@ async def test_operations_counts_are_owner_scoped_and_schema_summary_is_redacted
                 )
                 for index in range(3)
             ]
-            session.add_all(owner_runs + other_runs)
+            explorer_run = _run(
+                provider.id,
+                explorer_query.id,
+                token,
+                "on-demand",
+                CollectionStatus.RUNNING.value,
+                now,
+            )
+            explorer_run.run_metadata = {
+                "trigger": "on_demand",
+                "on_demand_user_ids": [str(owner.id)],
+            }
+            session.add_all(owner_runs + other_runs + [explorer_run])
             await session.flush()
             endpoint = f"/perf-safe-shape/{token}"
             session.add(
@@ -153,7 +166,7 @@ async def test_operations_counts_are_owner_scoped_and_schema_summary_is_redacted
             assert snapshot.run_counts.ready == 1
             assert snapshot.run_counts.retrying == 1
             assert snapshot.run_counts.leased == 1
-            assert snapshot.run_counts.running == 1
+            assert snapshot.run_counts.running == 2
             assert snapshot.run_counts.failed_24h == 1
             assert snapshot.queue_depths.collector == 4
             signal = next(item for item in snapshot.schema_signals if item.endpoint == endpoint)

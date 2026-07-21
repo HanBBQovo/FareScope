@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionRun, Provider, SchemaObservation, SearchQuery, Subscription
 from app.models.enums import CollectionStatus
+from app.services.collection_visibility import visible_collection_run_condition
 
 CELERY_READY_QUEUES = ("collector", "default", "analysis", "notifications")
 
@@ -91,7 +92,6 @@ async def _load_run_status_counts(
     user_id: UUID,
     now: datetime,
 ) -> RunStatusCounts:
-    query_ids = select(Subscription.search_query_id).where(Subscription.user_id == user_id)
     failed_since = now - timedelta(hours=24)
     statement = select(
         func.count()
@@ -122,7 +122,7 @@ async def _load_run_status_counts(
             )
         )
         .label("failed_24h"),
-    ).where(CollectionRun.search_query_id.in_(query_ids))
+    ).where(visible_collection_run_condition(user_id))
     row = (await session.execute(statement)).one()
     return RunStatusCounts(
         ready=int(row.ready or 0),

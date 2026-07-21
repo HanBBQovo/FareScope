@@ -382,10 +382,14 @@ async def test_on_demand_dispatch_to_collector_persists_a_run_end_to_end() -> No
                     select(Provider).where(Provider.code == "ctrip")
                 )
                 assert provider is not None
-                query, _ = await _create_query_user_and_leg(session, suffix="on-demand-e2e")
+                query, user = await _create_query_user_and_leg(
+                    session,
+                    suffix="on-demand-e2e",
+                )
                 run = await ensure_on_demand_collection_run(
                     session,
                     search_query=query,
+                    user_id=user.id,
                     now=now,
                 )
                 run_id = run.id
@@ -431,8 +435,72 @@ async def test_on_demand_dispatch_to_collector_persists_a_run_end_to_end() -> No
                 assert persisted is not None
                 assert persisted.status == CollectionStatus.SUCCEEDED.value
                 assert persisted.run_metadata["trigger"] == "on_demand"
+                assert persisted.run_metadata["on_demand_user_ids"] == [str(user.id)]
                 assert await _count(session, FareOffer, run_id) > 0
                 assert await _count(session, PriceObservation, run_id) > 0
+                repeated = await ensure_on_demand_collection_run(
+                    session,
+                    search_query=query,
+                    user_id=user.id,
+                    now=now + timedelta(seconds=60),
+                )
+                assert repeated.id == run_id
+        finally:
+            await transaction.rollback()
+    await engine.dispose()
+
+
+async def test_on_demand_creates_new_run_after_terminal_failure() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+    now = datetime.now(UTC).replace(microsecond=0)
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        factory = async_sessionmaker(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            async with factory() as session, session.begin():
+                provider = await session.scalar(
+                    select(Provider).where(Provider.code == "ctrip")
+                )
+                assert provider is not None
+                query, _ = await _create_query_user_and_leg(
+                    session,
+                    suffix="od-terminal",
+                )
+                failed_run = CollectionRun(
+                    search_query_id=query.id,
+                    provider_id=provider.id,
+                    idempotency_key=f"on-demand:{query.query_hash}:{int(now.timestamp() // 900)}",
+                    status=CollectionStatus.FAILED.value,
+                    attempt=3,
+                    max_attempts=3,
+                    scheduled_at=now,
+                    started_at=now,
+                    finished_at=now + timedelta(seconds=1),
+                    error_code="anti_bot_432",
+                    run_metadata={"trigger": "on_demand"},
+                )
+                session.add(failed_run)
+                await session.flush()
+
+                next_run = await ensure_on_demand_collection_run(
+                    session,
+                    search_query=query,
+                    now=now + timedelta(seconds=2),
+                )
+                repeated = await ensure_on_demand_collection_run(
+                    session,
+                    search_query=query,
+                    now=now + timedelta(seconds=3),
+                )
+
+            assert next_run.id != failed_run.id
+            assert next_run.status == CollectionStatus.PENDING.value
+            assert repeated.id == next_run.id
         finally:
             await transaction.rollback()
     await engine.dispose()
@@ -544,12 +612,20 @@ async def test_anti_bot_failure_keeps_classification_and_respects_retry_delay() 
             assert result["retryable"] is True
             assert result["retry_scheduled_at"] is not None
             assert runner.configs[0].browser_channel == "chrome"
+            assert runner.configs[0].headless is False
+            assert runner.configs[0].background is True
             async with factory() as session:
                 persisted = await session.get(CollectionRun, run_id)
                 assert persisted is not None
                 assert persisted.status == CollectionStatus.PENDING.value
                 assert persisted.attempt == 1
                 assert persisted.error_code == FailureKind.ANTI_BOT_432.value
+                assert persisted.run_metadata["collector"]["headless"] is False
+                assert persisted.run_metadata["collector"]["background"] is True
+                assert (
+                    persisted.run_metadata["collector"]["browser_mode"]
+                    == "headed_background"
+                )
                 assert persisted.run_metadata["failure"]["retryable"] is True
                 assert persisted.scheduled_at > datetime.now(UTC)
 

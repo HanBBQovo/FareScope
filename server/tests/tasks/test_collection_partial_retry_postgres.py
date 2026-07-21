@@ -8,7 +8,13 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.collectors.runtime import BrowserRunConfig, BrowserRunResult, CaptureRule
+from app.collectors.runtime import (
+    BrowserRunConfig,
+    BrowserRunResult,
+    CaptureDiagnostic,
+    CaptureRule,
+    FailureKind,
+)
 from app.collectors.runtime.models import CapturedPayload
 from app.models import (
     CalendarPriceObservation,
@@ -35,7 +41,7 @@ pytestmark = [
 ]
 
 
-async def test_calendar_only_capture_is_persisted_and_retried() -> None:
+async def test_calendar_only_capture_succeeds_with_warning() -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
     scheduled_at = datetime.now(UTC).replace(microsecond=0)
@@ -102,21 +108,24 @@ async def test_calendar_only_capture_is_persisted_and_retried() -> None:
                 worker_id="partial-data-test",
             )
 
-            assert result["status"] == CollectionStatus.PENDING.value
+            assert result["status"] == CollectionStatus.SUCCEEDED.value
             assert result["calendar_count"] == 1
             assert result["itinerary_count"] == 0
             assert result["price_observation_count"] == 0
-            assert result["retry_scheduled_at"] is not None
+            assert result["retry_scheduled_at"] is None
 
             async with factory() as session:
                 persisted = await session.get(CollectionRun, run_id)
                 assert persisted is not None
-                assert persisted.status == CollectionStatus.PENDING.value
-                assert persisted.upstream_status == "partial_fare_data"
-                assert persisted.error_code == "partial_fare_data"
+                assert persisted.status == CollectionStatus.SUCCEEDED.value
+                assert persisted.upstream_status == "success_with_warnings"
+                assert persisted.error_code is None
                 assert persisted.attempt == 1
-                assert persisted.scheduled_at > scheduled_at
+                assert persisted.scheduled_at == scheduled_at
                 assert persisted.run_metadata["partial_data"]["retryable"] is True
+                assert persisted.run_metadata["partial_data"]["missing_captures"] == [
+                    "batch_search"
+                ]
                 assert await _count(session, CalendarPriceObservation, run_id) == 1
                 assert await _count(session, FareOffer, run_id) == 0
                 assert await _count(session, CollectionArtifact, run_id) == 0
@@ -163,24 +172,6 @@ class _CalendarOnlyRunner:
                     ]
                 },
             ),
-            CapturedPayload(
-                provider="ctrip",
-                route_key=config.route_key,
-                capture_name="batch_search",
-                status_code=200,
-                url_without_query=(
-                    "https://flights.ctrip.com/international/search/api/search/batchSearch"
-                ),
-                received_at=finished_at,
-                payload={
-                    "status": 0,
-                    "data": {
-                        "bestChoiceFlightsForceTop": False,
-                        "lgn": False,
-                        "needUserLogin": False,
-                    },
-                },
-            ),
         )
         return BrowserRunResult(
             provider=config.provider,
@@ -188,6 +179,16 @@ class _CalendarOnlyRunner:
             started_at=finished_at - timedelta(seconds=1),
             finished_at=finished_at,
             captures=captures,
-            diagnostics=(),
+            diagnostics=(
+                CaptureDiagnostic(
+                    kind=FailureKind.ANTI_BOT_432,
+                    message="Provider returned HTTP 432 for a matched response",
+                    provider=config.provider,
+                    route_key=config.route_key,
+                    capture_name="batch_search",
+                    status_code=432,
+                    retryable=True,
+                ),
+            ),
             expected_capture_names=config.expected_capture_names,
         )

@@ -95,14 +95,18 @@ class BrowserRunResult:
 
     @property
     def success(self) -> bool:
+        fatal_kinds = {
+            FailureKind.ANTI_BOT_432,
+            FailureKind.BROWSER_UNAVAILABLE,
+            FailureKind.NAVIGATION_ERROR,
+            FailureKind.TIMEOUT,
+            FailureKind.INTERNAL_ERROR,
+        }
         return not self.missing_capture_names and not any(
-            diagnostic.kind
-            in {
-                FailureKind.ANTI_BOT_432,
-                FailureKind.BROWSER_UNAVAILABLE,
-                FailureKind.NAVIGATION_ERROR,
-                FailureKind.TIMEOUT,
-                FailureKind.INTERNAL_ERROR,
-            }
+            diagnostic.kind in fatal_kinds
+            and (
+                diagnostic.capture_name is None
+                or diagnostic.capture_name in self.missing_capture_names
+            )
             for diagnostic in self.diagnostics
         )

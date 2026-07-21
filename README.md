@@ -16,7 +16,7 @@ The core product runs locally end to end:
   provider returns them, history, low-fare calendars, and round-trip matrices;
 - saved 2-8 route comparison views with separate detailed-fare and exact-date calendar-price
   tracks, 7/30/90-day trends, stable gaps, and owner-scoped snapshots;
-- headed Google Chrome collection with database leases, Redis cross-process/host pacing, owner
+- background Google Chrome collection with database leases, Redis cross-process/host pacing, owner
   fencing, retries, partial-data handling, and schema diagnostics;
 - alert rules, events, Webhook/Telegram/Bark/PushPlus delivery, retry, delivery audit, and
   per-channel quiet-hour/weekday schedules;
@@ -29,10 +29,10 @@ The core product runs locally end to end:
   snapshot-fenced history merging, global disk reservations, download expiry, and a persistent
   shared file volume.
 
-The latest live `SHA-TYO` round-trip run stored 1,130 latest calendar snapshots. Ctrip returned no
-detailed offers for that sample after three bounded attempts, so FareScope reports a visible
-`partial_fare_data` warning instead of fabricating a price. Detailed itinerary contracts are
-covered by redacted one-way/round-trip fixtures and have also been observed on another live route.
+The latest live `SHA-TYO` one-way run completed through the same API path used by Fare Explorer
+without opening a visible browser. It stored 1,130 calendar observations, 141 itineraries, 469
+offers, and 430 price observations. Detailed itinerary contracts are still covered by redacted
+one-way/round-trip fixtures because provider response shape can vary by route and date.
 
 Reference concurrency is measured and the 100-route dashboard no longer times out at 32 concurrent
 API requests. A 1.44-million-observation run still exposed one service-layer pool timeout, so the
@@ -100,8 +100,9 @@ uv run --extra collector celery -A app.tasks.celery_app:celery_app worker \
 uv run celery -A app.tasks.celery_app:celery_app beat --loglevel=INFO
 ```
 
-For macOS local debugging, add `--pool=solo --concurrency=1` to each worker. Production runs the
-collector under Xvfb; see [deploy/collector/CHROME_RUNTIME.md](deploy/collector/CHROME_RUNTIME.md).
+For macOS local debugging, add `--pool=solo --concurrency=1` to each worker. The collector uses
+standard Chrome with a hidden, isolated temporary profile; Linux production uses the same headed
+browser kernel under Xvfb. See [deploy/collector/CHROME_RUNTIME.md](deploy/collector/CHROME_RUNTIME.md).
 
 Run the frontend and point its proxy at the API port:
 

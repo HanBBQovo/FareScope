@@ -984,4 +984,20 @@ def _issue_payload(issue: ParseIssue) -> dict[str, Any]:
 
 def _safe_diagnostic(value: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {"kind", "code", "message", "capture_name", "status_code", "retryable"}
-    return {key: str(value[key])[:500] for key in allowed if key in value}
+    safe = {key: str(value[key])[:500] for key in allowed if key in value}
+    details = value.get("details")
+    if isinstance(details, Mapping):
+        safe_details = {
+            key: str(details[key])[:120]
+            for key in (
+                "browser_channel",
+                "headless",
+                "background",
+                "browser_mode",
+                "exception_type",
+            )
+            if key in details
+        }
+        if safe_details:
+            safe["details"] = safe_details
+    return safe

@@ -77,6 +77,7 @@ from app.repositories.canonical_searches import get_or_create_canonical_search
 from app.services.collection_dispatch import dispatch_collection_run_safely
 from app.services.collection_operations import load_collection_operations
 from app.services.collection_runs import ensure_on_demand_collection_run
+from app.services.collection_visibility import visible_collection_run_condition
 from app.services.fare_data import (
     FareFilterSpec,
     SubscriptionFareContext,
@@ -214,6 +215,7 @@ async def search_fares(
         run = await ensure_on_demand_collection_run(
             database,
             search_query=search_query,
+            user_id=identity.user.id,
         )
 
     await dispatch_collection_run_safely(
@@ -546,8 +548,7 @@ async def collection_runs(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(error),
             ) from error
-    query_ids = select(Subscription.search_query_id).where(Subscription.user_id == identity.user.id)
-    statement = select(CollectionRun).where(CollectionRun.search_query_id.in_(query_ids))
+    statement = select(CollectionRun).where(visible_collection_run_condition(identity.user.id))
     if decoded_cursor is not None:
         statement = statement.where(
             tuple_(CollectionRun.scheduled_at, CollectionRun.id)

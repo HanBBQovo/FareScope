@@ -35,11 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Check the browser installation without requiring an active display",
     )
+    _add_browser_mode_arguments(doctor)
     browser_smoke = commands.add_parser(
         "browser-smoke",
-        help="Launch a headed browser without provider traffic",
+        help="Launch a browser without provider traffic",
     )
     _add_browser_channel_argument(browser_smoke)
+    _add_browser_mode_arguments(browser_smoke)
 
     capture = commands.add_parser("capture", help="Observe known page-generated responses")
     capture.add_argument("--page-url", required=True)
@@ -55,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--screenshot-directory", type=Path)
     capture.add_argument("--proxy-server")
     _add_browser_channel_argument(capture)
+    _add_browser_mode_arguments(capture)
     return parser
 
 
@@ -62,13 +65,46 @@ def _add_browser_channel_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--browser-channel",
         choices=_BROWSER_CHANNELS,
-        default="chromium",
+        default="chrome",
+    )
+
+
+def _add_browser_mode_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--headless",
+        dest="headless",
+        action="store_true",
+        default=None,
+        help="Use Chrome's true headless mode (provider compatibility may differ)",
+    )
+    group.add_argument(
+        "--headed",
+        dest="headless",
+        action="store_false",
+        help="Use the standard headed browser kernel; Linux requires DISPLAY or Xvfb",
+    )
+    background_group = parser.add_mutually_exclusive_group()
+    background_group.add_argument(
+        "--background",
+        dest="background",
+        action="store_true",
+        default=None,
+        help="Hide headed Chrome on macOS; Linux uses Xvfb",
+    )
+    background_group.add_argument(
+        "--foreground",
+        dest="background",
+        action="store_false",
+        help="Allow a headed browser window to be shown for debugging",
     )
 
 
 def doctor_summary(
-    browser_channel: str = "chromium",
+    browser_channel: str = "chrome",
     *,
+    headless: bool = False,
+    background: bool = True,
     require_display: bool = True,
 ) -> dict[str, Any]:
     is_linux = platform.system() == "Linux"
@@ -83,9 +119,11 @@ def doctor_summary(
         ),
         "playwright_python_installed": playwright_installed,
         "platform": platform.system(),
-        "display_required": require_display,
+        "display_required": require_display and not headless,
         "display_configured": display_configured,
-        "headed_mode": True,
+        "headless": headless,
+        "headed_mode": not headless,
+        "background": background,
         "browser_channel": browser_channel,
         "browser_executable_found": browser_found,
         "browser_version": browser_version,
@@ -95,6 +133,8 @@ def doctor_summary(
 
 
 async def run_browser_smoke(args: argparse.Namespace) -> dict[str, Any]:
+    headless = _headless_mode(args)
+    background = _background_mode(args)
     result = await PlaywrightCaptureRunner().run(
         BrowserRunConfig(
             provider="local",
@@ -102,16 +142,22 @@ async def run_browser_smoke(args: argparse.Namespace) -> dict[str, Any]:
             page_url="about:blank",
             expected_capture_names=frozenset(),
             browser_channel=_browser_channel(args.browser_channel),
+            headless=headless,
+            background=background,
         ),
         capture_rules=(),
     )
     summary = serialize_result(result)
     summary["browser_channel"] = args.browser_channel
+    summary["headless"] = headless
+    summary["background"] = background
     summary["provider_network_requested"] = False
     return summary
 
 
 async def run_capture(args: argparse.Namespace) -> dict[str, Any]:
+    headless = _headless_mode(args)
+    background = _background_mode(args)
     result = await PlaywrightCaptureRunner().run(
         BrowserRunConfig(
             provider="ctrip",
@@ -123,11 +169,15 @@ async def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             screenshot_directory=args.screenshot_directory,
             proxy_server=args.proxy_server,
             browser_channel=_browser_channel(args.browser_channel),
+            headless=headless,
+            background=background,
         ),
         capture_rules=ctrip_capture_rules(),
     )
     summary = serialize_result(result)
     summary["browser_channel"] = args.browser_channel
+    summary["headless"] = headless
+    summary["background"] = background
     return summary
 
 
@@ -164,6 +214,28 @@ def serialize_result(result: Any) -> dict[str, Any]:
 
 def _browser_channel(value: str) -> str | None:
     return None if value == "chromium" else value
+
+
+def _headless_mode(args: argparse.Namespace) -> bool:
+    if getattr(args, "headless", None) is not None:
+        return bool(args.headless)
+    return _env_default_headless()
+
+
+def _env_default_headless() -> bool:
+    raw = os.getenv("FARESCOPE_COLLECTOR_BROWSER_HEADLESS")
+    if raw is None:
+        return False
+    return raw.strip().casefold() not in {"0", "false", "no", "off", "headed"}
+
+
+def _background_mode(args: argparse.Namespace) -> bool:
+    if getattr(args, "background", None) is not None:
+        return bool(args.background)
+    raw = os.getenv("FARESCOPE_COLLECTOR_BROWSER_BACKGROUND")
+    if raw is None:
+        return True
+    return raw.strip().casefold() not in {"0", "false", "no", "off", "foreground"}
 
 
 def _browser_runtime_status(browser_channel: str) -> tuple[bool, str | None]:
@@ -218,9 +290,12 @@ def main() -> int:
     args = build_parser().parse_args()
     command = args.command or "doctor"
     if command == "doctor":
+        headless = _headless_mode(args)
         summary = doctor_summary(
-            getattr(args, "browser_channel", "chromium"),
-            require_display=not getattr(args, "skip_display_check", False),
+            getattr(args, "browser_channel", "chrome"),
+            headless=headless,
+            background=_background_mode(args),
+            require_display=not getattr(args, "skip_display_check", False) and not headless,
         )
     elif command == "browser-smoke":
         summary = asyncio.run(run_browser_smoke(args))

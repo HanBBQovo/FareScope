@@ -74,7 +74,18 @@ async def test_shared_run_is_visible_only_to_current_canonical_query_subscribers
                     started_at=now,
                     run_metadata={},
                 )
-                session.add(run)
+                on_demand_run = CollectionRun(
+                    search_query_id=other_query.id,
+                    provider_id=provider.id,
+                    idempotency_key=f"realtime-on-demand:{token}",
+                    status="running",
+                    attempt=1,
+                    max_attempts=3,
+                    scheduled_at=now + timedelta(seconds=1),
+                    started_at=now + timedelta(seconds=1),
+                    run_metadata={"trigger": "on_demand", "on_demand_user_ids": [str(owner.id)]},
+                )
+                session.add_all([run, on_demand_run])
 
             assert (
                 await load_visible_collection_event(
@@ -103,6 +114,24 @@ async def test_shared_run_is_visible_only_to_current_canonical_query_subscribers
                 )
                 is None
             )
+            assert (
+                await load_visible_collection_event(
+                    factory,
+                    user_id=owner.id,
+                    user_session_id=owner_session.id,
+                    run_id=on_demand_run.id,
+                )
+                is not None
+            )
+            assert (
+                await load_visible_collection_event(
+                    factory,
+                    user_id=co_subscriber.id,
+                    user_session_id=shared_session.id,
+                    run_id=on_demand_run.id,
+                )
+                is None
+            )
             assert {
                 item.run_id
                 for item in await load_initial_collection_snapshot(
@@ -111,7 +140,7 @@ async def test_shared_run_is_visible_only_to_current_canonical_query_subscribers
                     user_session_id=owner_session.id,
                     limit=100,
                 )
-            } == {run.id}
+            } == {run.id, on_demand_run.id}
 
             async with factory() as session, session.begin():
                 await session.delete(await session.get(Subscription, owner_subscription.id))
@@ -123,6 +152,15 @@ async def test_shared_run_is_visible_only_to_current_canonical_query_subscribers
                     run_id=run.id,
                 )
                 is None
+            )
+            assert (
+                await load_visible_collection_event(
+                    factory,
+                    user_id=owner.id,
+                    user_session_id=owner_session.id,
+                    run_id=on_demand_run.id,
+                )
+                is not None
             )
 
             async with factory() as session, session.begin():

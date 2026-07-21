@@ -15,8 +15,9 @@ from redis.asyncio import Redis
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models import CollectionRun, Subscription, User, UserSession
+from app.models import CollectionRun, User, UserSession
 from app.models.enums import CollectionStatus, UserStatus
+from app.services.collection_visibility import visible_collection_run_condition
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -157,12 +158,7 @@ async def load_initial_collection_snapshot(
     now: datetime | None = None,
 ) -> tuple[CollectionRunEvent, ...]:
     current_time = now or datetime.now(UTC)
-    owner_scope = exists(
-        select(Subscription.id).where(
-            Subscription.user_id == user_id,
-            Subscription.search_query_id == CollectionRun.search_query_id,
-        )
-    )
+    owner_scope = visible_collection_run_condition(user_id)
     active_session = exists(
         select(UserSession.id)
         .join(User, User.id == UserSession.user_id)
@@ -195,12 +191,7 @@ async def load_visible_collection_event(
     now: datetime | None = None,
 ) -> CollectionRunEvent | None:
     current_time = now or datetime.now(UTC)
-    owner_scope = exists(
-        select(Subscription.id).where(
-            Subscription.user_id == user_id,
-            Subscription.search_query_id == CollectionRun.search_query_id,
-        )
-    )
+    owner_scope = visible_collection_run_condition(user_id)
     active_session = exists(
         select(UserSession.id)
         .join(User, User.id == UserSession.user_id)

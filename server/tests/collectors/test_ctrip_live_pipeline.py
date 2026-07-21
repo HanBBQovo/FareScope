@@ -123,9 +123,9 @@ async def test_live_one_way_page_persists_available_prices_without_raw_artifacts
                     assert await _count(session, FareOffer, run_id) > 0
                     assert await _count(session, PriceObservation, run_id) > 0
                 else:
-                    assert result["status"] == CollectionStatus.PENDING.value, safe_failure
-                    assert result["retry_scheduled_at"] is not None
-                    assert persisted_run.upstream_status == "partial_fare_data"
+                    assert result["status"] == CollectionStatus.SUCCEEDED.value, safe_failure
+                    assert result["retry_scheduled_at"] is None
+                    assert persisted_run.upstream_status == "success_with_warnings"
         finally:
             await transaction.rollback()
     await engine.dispose()
@@ -219,9 +219,9 @@ async def test_live_round_trip_page_preserves_calendar_and_available_details() -
             async with factory() as session:
                 assert await _count(session, CollectionArtifact, run_id) == 0
                 if result["itinerary_count"] == 0:
-                    assert result["status"] == CollectionStatus.PENDING.value, safe_failure
-                    assert result["retry_scheduled_at"] is not None
-                    assert persisted_run.upstream_status == "partial_fare_data"
+                    assert result["status"] == CollectionStatus.SUCCEEDED.value, safe_failure
+                    assert result["retry_scheduled_at"] is None
+                    assert persisted_run.upstream_status == "success_with_warnings"
                 else:
                     assert result["status"] == CollectionStatus.SUCCEEDED.value, safe_failure
                     assert result["offer_count"] > 0, safe_failure
