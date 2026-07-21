@@ -48,6 +48,7 @@ from app.api.schemas.fares import (
     FareOfferPublic,
     FareSearchQueryPublic,
     FareSearchResponse,
+    FareSegmentPublic,
     PriceHistoryResponse,
     PricePointPublic,
     ResponseMeta,
@@ -847,32 +848,7 @@ async def _load_offers(
             by_leg[segment.leg_position].append(segment)
         legs = []
         for leg_position, leg_segments in sorted(by_leg.items()):
-            first = leg_segments[0]
-            last = leg_segments[-1]
-            elapsed_minutes = int(
-                (last.arrival_at_utc - first.departure_at_utc).total_seconds() // 60
-            )
-            technical_stops = sum(
-                int((segment.segment_metadata or {}).get("technical_stop_count") or 0)
-                for segment in leg_segments
-            )
-            legs.append(
-                FareLegPublic(
-                    direction="outbound" if leg_position == 0 else "inbound",
-                    flightNumber=first.flight_number,
-                    airline=first.marketing_airline_code,
-                    origin=first.origin_airport_code,
-                    destination=last.destination_airport_code,
-                    departureAt=first.departure_at_utc,
-                    arrivalAt=last.arrival_at_utc,
-                    stops=max(0, len(leg_segments) - 1) + technical_stops,
-                    durationMinutes=(
-                        elapsed_minutes
-                        if elapsed_minutes > 0
-                        else sum(segment.duration_minutes for segment in leg_segments)
-                    ),
-                )
-            )
+            legs.append(_fare_leg_public(leg_position, leg_segments))
         result.append(
             FareOfferPublic(
                 id=offer.id,
@@ -885,6 +861,79 @@ async def _load_offers(
             )
         )
     return result, has_more, int(total or 0)
+
+
+def _fare_leg_public(leg_position: int, segments: list[Segment]) -> FareLegPublic:
+    first = segments[0]
+    last = segments[-1]
+    elapsed_minutes = int(
+        (last.arrival_at_utc - first.departure_at_utc).total_seconds() // 60
+    )
+    segment_payloads = [_fare_segment_public(segment) for segment in segments]
+    technical_stops = sum(segment.technical_stop_count for segment in segment_payloads)
+    return FareLegPublic(
+        direction="outbound" if leg_position == 0 else "inbound",
+        flightNumber=first.flight_number,
+        airline=first.marketing_airline_code,
+        origin=first.origin_airport_code,
+        originName=segment_payloads[0].origin_name,
+        destination=last.destination_airport_code,
+        destinationName=segment_payloads[-1].destination_name,
+        departureAt=first.departure_at_utc,
+        arrivalAt=last.arrival_at_utc,
+        stops=max(0, len(segments) - 1) + technical_stops,
+        durationMinutes=(
+            elapsed_minutes
+            if elapsed_minutes > 0
+            else sum(segment.duration_minutes for segment in segments)
+        ),
+        segments=segment_payloads,
+    )
+
+
+def _fare_segment_public(segment: Segment) -> FareSegmentPublic:
+    metadata = segment.segment_metadata or {}
+    technical_stop_count = metadata.get("technical_stop_count")
+    try:
+        parsed_technical_stop_count = max(0, int(technical_stop_count or 0))
+    except (TypeError, ValueError):
+        parsed_technical_stop_count = 0
+    return FareSegmentPublic(
+        position=segment.position,
+        flightNumber=segment.flight_number,
+        operatingFlightNumber=_metadata_text(metadata, "operating_flight_number"),
+        airline=segment.marketing_airline_code,
+        airlineName=_metadata_text(metadata, "marketing_airline_name"),
+        origin=segment.origin_airport_code,
+        originName=(
+            _metadata_text(metadata, "departure_airport_name")
+            or segment.origin_airport_code
+        ),
+        originTerminal=_metadata_text(metadata, "departure_terminal"),
+        destination=segment.destination_airport_code,
+        destinationName=(
+            _metadata_text(metadata, "arrival_airport_name")
+            or segment.destination_airport_code
+        ),
+        destinationTerminal=_metadata_text(metadata, "arrival_terminal"),
+        departureAt=segment.departure_at_utc,
+        arrivalAt=segment.arrival_at_utc,
+        departureLocal=segment.departure_local,
+        arrivalLocal=segment.arrival_local,
+        departureTimezone=segment.departure_timezone,
+        arrivalTimezone=segment.arrival_timezone,
+        durationMinutes=segment.duration_minutes,
+        technicalStopCount=parsed_technical_stop_count,
+        aircraftCode=segment.aircraft_code,
+    )
+
+
+def _metadata_text(metadata: dict[str, object], key: str) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized[:160] or None
 
 
 def _split_codes(value: str | None) -> tuple[str, ...]:

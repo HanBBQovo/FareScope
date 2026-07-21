@@ -24,6 +24,31 @@ class FareSearchQueryPublic(BaseModel):
     passengers: int
 
 
+class FareSegmentPublic(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    position: int
+    flight_number: str = Field(alias="flightNumber")
+    operating_flight_number: str | None = Field(default=None, alias="operatingFlightNumber")
+    airline: str
+    airline_name: str | None = Field(default=None, alias="airlineName")
+    origin: str
+    origin_name: str = Field(alias="originName")
+    origin_terminal: str | None = Field(default=None, alias="originTerminal")
+    destination: str
+    destination_name: str = Field(alias="destinationName")
+    destination_terminal: str | None = Field(default=None, alias="destinationTerminal")
+    departure_at: datetime = Field(alias="departureAt")
+    arrival_at: datetime = Field(alias="arrivalAt")
+    departure_local: datetime = Field(alias="departureLocal")
+    arrival_local: datetime = Field(alias="arrivalLocal")
+    departure_timezone: str = Field(alias="departureTimezone")
+    arrival_timezone: str = Field(alias="arrivalTimezone")
+    duration_minutes: int = Field(alias="durationMinutes")
+    technical_stop_count: int = Field(default=0, alias="technicalStopCount")
+    aircraft_code: str | None = Field(default=None, alias="aircraftCode")
+
+
 class FareLegPublic(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -31,11 +56,14 @@ class FareLegPublic(BaseModel):
     flight_number: str = Field(alias="flightNumber")
     airline: str
     origin: str
+    origin_name: str = Field(alias="originName")
     destination: str
+    destination_name: str = Field(alias="destinationName")
     departure_at: datetime = Field(alias="departureAt")
     arrival_at: datetime = Field(alias="arrivalAt")
     stops: int
     duration_minutes: int = Field(alias="durationMinutes")
+    segments: list[FareSegmentPublic]
 
 
 class FareOfferPublic(BaseModel):

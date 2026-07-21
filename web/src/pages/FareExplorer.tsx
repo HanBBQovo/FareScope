@@ -1,9 +1,26 @@
 import { useMemo, useState } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { CalendarDays, CheckCircle2, CircleStop, Clock3, Plane, RefreshCw, SearchX, ShieldAlert } from 'lucide-react'
+import {
+  ArrowRight,
+  CheckCircle2,
+  CircleStop,
+  Clock3,
+  Plane,
+  RefreshCw,
+  SearchX,
+  ShieldAlert,
+} from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
-import { fareQueryKeys, searchFlights, type CollectionStateStatus, type FlightOffer, type FlightSearchParams } from '@/api/fares'
+import {
+  fareQueryKeys,
+  searchFlights,
+  type CollectionStateStatus,
+  type FlightLeg,
+  type FlightOffer,
+  type FlightSearchParams,
+  type FlightSegment,
+} from '@/api/fares'
 import { DataModeNotice } from '@/components/fare/DataModeNotice'
 import { FlightSearchForm } from '@/components/fare/FlightSearchForm'
 import { QueryState } from '@/components/fare/QueryState'
@@ -11,9 +28,19 @@ import { PageShell, PageSurface } from '@/components/layout/PageScaffold'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { readableLocation } from '@/lib/airport-directory'
+import {
+  calculateLayoverMinutes,
+  formatDurationMinutes,
+  localDateTimeParts,
+  terminalChangeLabel,
+} from '@/lib/flight-itinerary'
 import { formatCurrency, formatDateTime } from '@/lib/formatters'
 import { defaultFlightSearchValues } from '@/lib/flight-search'
+import { cn } from '@/lib/utils'
 
 function formatFare(value: number, currency: string): string {
   return formatCurrency(value / 100, currency)
@@ -63,7 +90,7 @@ function CollectionStateNotice({ status, errorCode }: { status: CollectionStateS
       <Alert>
         <CheckCircle2 data-icon="inline-start" />
         <AlertTitle>采集完成</AlertTitle>
-        <AlertDescription>下面是本次已保存的报价快照，价格旁边会显示实际观测时间。</AlertDescription>
+        <AlertDescription>下面是本次已保存的真实报价，价格旁边会显示实际观测时间。</AlertDescription>
       </Alert>
     )
   }
@@ -140,18 +167,23 @@ export default function FareExplorer() {
   return (
     <PageShell
       title="航线探索"
-      description="按单程或往返、直飞、价格、航空公司、中转和时间条件查询已采集的航班报价。"
+      description="按城市或机场搜索单程、往返和直飞报价，并查看每一段航班与中转信息。"
       width="7xl"
-      actions={<Button type="button" variant="outline" onClick={() => result.refetch()} disabled={!submittedQuery || result.isFetching}><RefreshCw data-icon="inline-start" className={result.isFetching ? 'animate-spin' : undefined} />刷新结果</Button>}
+      actions={(
+        <Button type="button" variant="outline" onClick={() => result.refetch()} disabled={!submittedQuery || result.isFetching}>
+          <RefreshCw data-icon="inline-start" className={result.isFetching ? 'animate-spin' : undefined} />
+          刷新结果
+        </Button>
+      )}
     >
       <div className="flex flex-col gap-6">
-        <PageSurface title="查询条件" description="修改条件后点击查询，页面打开时不会自动触发上游采集。">
+        <PageSurface title="查询条件" description="输入中文城市或机场名称即可搜索，页面打开时不会自动触发采集。">
           <FlightSearchForm key={JSON.stringify(initialQuery)} initialValues={initialQuery} submitting={result.isFetching} onSubmit={submit} />
         </PageSurface>
 
         {!submittedQuery && !result.data ? (
           <PageSurface>
-            <EmptyState icon={<SearchX />} title="等待查询" description="提交一组出发地、目的地和日期后，这里会显示实时采集状态与航班明细。" />
+            <EmptyState icon={<SearchX />} title="等待查询" description="选择出发地、目的地和日期后，这里会显示采集状态、价格、机场和完整航段。" />
           </PageSurface>
         ) : null}
 
@@ -163,23 +195,26 @@ export default function FareExplorer() {
                 <CollectionStateNotice status={firstResult.collection.status} errorCode={firstResult.collection.errorCode} />
                 {firstResult.collection.status === 'succeeded' ? (
                   <PageSurface
-                    title={`${firstResult.query.origin} → ${firstResult.query.destination}`}
-                    description={`${firstResult.query.tripType === 'roundtrip' ? '往返' : '单程'} · ${firstResult.query.departureDate}${firstResult.query.returnDate ? ` 至 ${firstResult.query.returnDate}` : ''} · 已加载 ${offers.length} 个结果`}
+                    title={`${readableLocation(firstResult.query.origin)} → ${readableLocation(firstResult.query.destination)}`}
+                    description={`${firstResult.query.tripType === 'roundtrip' ? '往返' : '单程'} · ${firstResult.query.departureDate}${firstResult.query.returnDate ? ` 至 ${firstResult.query.returnDate}` : ''} · 共 ${firstResult.total} 个报价，已加载 ${offers.length} 个`}
+                    actions={<Badge variant="secondary">价格从低到高</Badge>}
                     bodyClassName="p-0"
                   >
                     {offers.length ? (
-                      <>
-                        <div className="divide-y">
-                          {offers.map((offer) => <OfferRow key={offer.id} offer={offer} />)}
+                      <ScrollArea className="h-[72vh] max-h-[760px] min-h-[420px]">
+                        <div className="flex flex-col gap-3 p-3 sm:p-4">
+                          {offers.map((offer) => <OfferCard key={offer.id} offer={offer} />)}
+                          {result.hasNextPage ? (
+                            <div className="flex justify-center py-2">
+                              <Button type="button" variant="outline" onClick={() => result.fetchNextPage()} disabled={result.isFetchingNextPage}>
+                                {result.isFetchingNextPage ? '加载中…' : '加载更多报价'}
+                              </Button>
+                            </div>
+                          ) : (
+                            <p className="py-2 text-center text-xs text-muted-foreground">已经加载全部符合条件的报价</p>
+                          )}
                         </div>
-                        {result.hasNextPage ? (
-                          <div className="flex justify-center border-t p-4">
-                            <Button type="button" variant="outline" onClick={() => result.fetchNextPage()} disabled={result.isFetchingNextPage}>
-                              {result.isFetchingNextPage ? '加载中…' : '加载更多报价'}
-                            </Button>
-                          </div>
-                        ) : null}
-                      </>
+                      </ScrollArea>
                     ) : (
                       <EmptyState title="采集完成但没有符合条件的报价" description="这是真实空结果，不会被当作零价。可以放宽直飞、价格、航司或中转条件后重新查询。" />
                     )}
@@ -194,56 +229,198 @@ export default function FareExplorer() {
   )
 }
 
-function offerLabel(offer: FlightOffer): string {
-  const outbound = offer.legs.find((leg) => leg.direction === 'outbound')
-  return outbound ? `${outbound.airline} · ${outbound.flightNumber}` : '航班行程'
+function normalizedSegments(leg: FlightLeg): FlightSegment[] {
+  if (Array.isArray(leg.segments) && leg.segments.length) return leg.segments
+  return [{
+    position: 0,
+    flightNumber: leg.flightNumber,
+    operatingFlightNumber: null,
+    airline: leg.airline,
+    airlineName: null,
+    origin: leg.origin,
+    originName: leg.originName || readableLocation(leg.origin),
+    originTerminal: null,
+    destination: leg.destination,
+    destinationName: leg.destinationName || readableLocation(leg.destination),
+    destinationTerminal: null,
+    departureAt: leg.departureAt,
+    arrivalAt: leg.arrivalAt,
+    departureLocal: leg.departureAt.replace(/Z$/, ''),
+    arrivalLocal: leg.arrivalAt.replace(/Z$/, ''),
+    departureTimezone: 'UTC',
+    arrivalTimezone: 'UTC',
+    durationMinutes: leg.durationMinutes,
+    technicalStopCount: leg.stops,
+    aircraftCode: null,
+  }]
 }
 
-function OfferRow({ offer }: { offer: FlightOffer }) {
-  const [outbound, inbound] = [
-    offer.legs.find((leg) => leg.direction === 'outbound'),
-    offer.legs.find((leg) => leg.direction === 'inbound'),
-  ]
+function offerLabel(offer: FlightOffer): string {
+  const flightNumbers = offer.legs
+    .flatMap((leg) => normalizedSegments(leg).map((segment) => segment.flightNumber))
+  const unique = [...new Set(flightNumbers)]
+  if (!unique.length) return '航班行程'
+  return unique.length > 2 ? `${unique.slice(0, 2).join(' / ')} 等` : unique.join(' / ')
+}
+
+function providerLabel(provider: string): string {
+  return provider.toLowerCase() === 'ctrip' ? '携程' : provider
+}
+
+function OfferCard({ offer }: { offer: FlightOffer }) {
+  const direct = offer.legs.every((leg) => leg.stops === 0)
+  const allSegments = offer.legs.flatMap(normalizedSegments)
+  const firstSegment = allSegments[0]
+  const lastSegment = allSegments[allSegments.length - 1]
+  const routeLabel = firstSegment && lastSegment
+    ? `${firstSegment.originName} → ${lastSegment.destinationName}`
+    : '航班行程'
 
   return (
-    <article className="grid gap-5 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary"><Plane data-icon="inline-start" />{offerLabel(offer)}</Badge>
-          {offer.legs.every((leg) => leg.stops === 0) ? <Badge variant="outline">直飞</Badge> : <Badge variant="outline"><CircleStop data-icon="inline-start" />含中转</Badge>}
-          <span className="text-xs text-muted-foreground">{offer.provider} · 采集于 {formatDateTime(offer.observedAt)}</span>
+    <Card>
+      <CardHeader className="gap-4 p-4 sm:p-5">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary"><Plane data-icon="inline-start" />{offerLabel(offer)}</Badge>
+              <Badge variant="outline">
+                {direct ? '直飞' : <><CircleStop data-icon="inline-start" />含中转</>}
+              </Badge>
+              <Badge variant="outline">{offer.cabin}</Badge>
+            </div>
+            <CardTitle className="text-base leading-6">{routeLabel}</CardTitle>
+            <CardDescription>{offer.legs.length === 2 ? '完整往返总价' : '单程含税总价'} · {providerLabel(offer.provider)}</CardDescription>
+          </div>
+          <div className="shrink-0 sm:text-right">
+            <p className="text-xs text-muted-foreground">{offer.legs.length === 2 ? '往返总价' : '每位成人'}</p>
+            <p className="font-mono text-2xl font-semibold tracking-tight">{formatFare(offer.totalPriceMinor, offer.currency)}</p>
+          </div>
         </div>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <LegSummary label="去程" leg={outbound} />
-          {inbound ? <LegSummary label="返程" leg={inbound} /> : null}
-        </div>
-      </div>
-      <div className="flex items-end justify-between gap-4 border-t pt-4 lg:flex-col lg:items-end lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0">
-        <div>
-          <p className="text-xs text-muted-foreground">含税总价 · {offer.cabin}</p>
-          <p className="mt-1 font-mono text-xl font-semibold">{formatFare(offer.totalPriceMinor, offer.currency)}</p>
-        </div>
-        <p className="max-w-40 text-right text-xs text-muted-foreground">报价来源：{offer.provider}</p>
-      </div>
-    </article>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 px-4 pb-4 sm:px-5 sm:pb-5">
+        {offer.legs.map((leg) => (
+          <FlightLegDetails key={leg.direction} leg={leg} />
+        ))}
+      </CardContent>
+      <CardFooter className="justify-between gap-3 border-t px-4 py-3 text-xs text-muted-foreground sm:px-5">
+        <span>报价来源：{providerLabel(offer.provider)}</span>
+        <span>采集于 {formatDateTime(offer.observedAt)}</span>
+      </CardFooter>
+    </Card>
   )
 }
 
-function LegSummary({ label, leg }: { label: string; leg?: FlightOffer['legs'][number] }) {
-  if (!leg) return null
+function FlightLegDetails({ leg }: { leg: FlightLeg }) {
+  const segments = normalizedSegments(leg)
+  const transferCount = Math.max(0, segments.length - 1)
   return (
-    <div className="min-w-0 rounded-md border bg-muted/20 p-3">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground"><CalendarDays aria-hidden="true" />{label} · {leg.flightNumber}</div>
-      <div className="mt-2 flex items-center gap-2 text-sm font-medium">
-        <span>{new Date(leg.departureAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
-        <span className="text-muted-foreground">{leg.origin}</span>
-        <span className="h-px flex-1 bg-border" />
-        <span className="text-muted-foreground">{leg.destination}</span>
-        <span>{new Date(leg.arrivalAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+    <section className="overflow-hidden rounded-lg border bg-muted/20" aria-label={leg.direction === 'outbound' ? '去程航段' : '返程航段'}>
+      <div className="flex flex-col gap-1 border-b px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <Badge>{leg.direction === 'outbound' ? '去程' : '返程'}</Badge>
+          <span className="text-sm font-medium">{leg.originName || leg.origin} → {leg.destinationName || leg.destination}</span>
+        </div>
+        <span className="text-xs text-muted-foreground">
+          {segments.length} 个航段 · {transferCount ? `${transferCount} 次换乘` : leg.stops ? `${leg.stops} 次经停` : '直飞'} · 全程 {formatDurationMinutes(leg.durationMinutes)}
+        </span>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        {formatDateTime(leg.departureAt)} 出发 · {Math.floor(leg.durationMinutes / 60)}h {leg.durationMinutes % 60}m · {leg.stops === 0 ? '直飞' : `${leg.stops} 次中转`}
-      </p>
+      <div className="flex flex-col gap-2 p-3">
+        {segments.map((segment, index) => {
+          const next = segments[index + 1]
+          return (
+            <div key={`${segment.position}-${segment.flightNumber}`} className="flex flex-col gap-2">
+              <FlightSegmentDetails segment={segment} />
+              {next ? <TransferDetails current={segment} next={next} /> : null}
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function FlightSegmentDetails({ segment }: { segment: FlightSegment }) {
+  const departure = localDateTimeParts(segment.departureLocal)
+  const arrival = localDateTimeParts(segment.arrivalLocal)
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary">{segment.airlineName || segment.airline} · {segment.flightNumber}</Badge>
+          {segment.operatingFlightNumber && segment.operatingFlightNumber !== segment.flightNumber ? (
+            <span className="text-xs text-muted-foreground">实际承运 {segment.operatingFlightNumber}</span>
+          ) : null}
+        </div>
+        <span className="text-xs text-muted-foreground">飞行 {formatDurationMinutes(segment.durationMinutes)}</span>
+      </div>
+      <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3">
+        <AirportEndpoint
+          date={departure.date}
+          time={departure.time}
+          name={segment.originName}
+          code={segment.origin}
+          terminal={segment.originTerminal}
+        />
+        <ArrowRight aria-hidden="true" className="text-muted-foreground" />
+        <AirportEndpoint
+          align="right"
+          date={arrival.date}
+          time={arrival.time}
+          name={segment.destinationName}
+          code={segment.destination}
+          terminal={segment.destinationTerminal}
+        />
+      </div>
+      {segment.technicalStopCount > 0 ? (
+        <Alert className="mt-3">
+          <CircleStop data-icon="inline-start" />
+          <AlertTitle>本航段经停 {segment.technicalStopCount} 次</AlertTitle>
+          <AlertDescription>供应商没有提供经停机场名称，因此不会猜测中途机场。</AlertDescription>
+        </Alert>
+      ) : null}
     </div>
+  )
+}
+
+function AirportEndpoint({
+  date,
+  time,
+  name,
+  code,
+  terminal,
+  align = 'left',
+}: {
+  date: string
+  time: string
+  name: string
+  code: string
+  terminal: string | null
+  align?: 'left' | 'right'
+}) {
+  return (
+    <div className={cn('min-w-0', align === 'right' && 'text-right')}>
+      <p className="font-mono text-xl font-semibold tabular-nums">{time}</p>
+      <p className="text-xs text-muted-foreground">{date} · 当地时间</p>
+      <p className="mt-2 text-sm font-medium leading-5">{name || code}</p>
+      <div className={cn('mt-1 flex flex-wrap gap-1.5', align === 'right' && 'justify-end')}>
+        <Badge variant="outline">{code}</Badge>
+        {terminal ? <Badge variant="outline">{terminal}</Badge> : null}
+      </div>
+    </div>
+  )
+}
+
+function TransferDetails({ current, next }: { current: FlightSegment; next: FlightSegment }) {
+  const minutes = calculateLayoverMinutes(current, next)
+  const terminal = terminalChangeLabel(current, next)
+  return (
+    <Alert>
+      <Clock3 data-icon="inline-start" />
+      <AlertTitle>在 {current.destinationName || next.originName}（{current.destination}）中转</AlertTitle>
+      <AlertDescription>
+        {minutes === null ? '停留时间未知' : `停留 ${formatDurationMinutes(minutes)}`}
+        {terminal ? ` · ${terminal}` : ''}
+      </AlertDescription>
+    </Alert>
   )
 }

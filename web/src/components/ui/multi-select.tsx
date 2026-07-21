@@ -16,9 +16,11 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { cn } from '@/lib/utils'
 
 export interface MultiSelectProps {
+  id?: string
   options: SelectOption[]
   value: string[]
   onValueChange: (value: string[]) => void
+  ariaLabel?: string
   placeholder?: string
   searchPlaceholder?: string
   emptyText?: string
@@ -29,9 +31,11 @@ export interface MultiSelectProps {
 }
 
 export function MultiSelect({
+  id,
   options,
   value,
   onValueChange,
+  ariaLabel,
   placeholder = '请选择',
   searchPlaceholder = '搜索...',
   emptyText = '没有匹配选项',
@@ -66,10 +70,12 @@ export function MultiSelect({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
+          id={id}
           type="button"
           variant="outline"
           role="combobox"
           aria-expanded={open}
+          aria-label={ariaLabel}
           disabled={disabled}
           className={cn('min-h-9 h-auto w-full justify-between px-3 py-1.5 font-normal', !selectedOptions.length && 'text-muted-foreground', className)}
         >

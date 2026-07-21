@@ -15,9 +15,12 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { cn } from '@/lib/utils'
 
 export interface ComboboxProps {
+  id?: string
   options: SelectOption[]
   value?: string
   onValueChange: (value: string) => void
+  ariaLabel?: string
+  ariaInvalid?: boolean
   placeholder?: string
   searchPlaceholder?: string
   emptyText?: string
@@ -28,9 +31,12 @@ export interface ComboboxProps {
 }
 
 export function Combobox({
+  id,
   options,
   value,
   onValueChange,
+  ariaLabel,
+  ariaInvalid = false,
   placeholder = '请选择',
   searchPlaceholder = '搜索...',
   emptyText = '没有匹配选项',
@@ -51,10 +57,13 @@ export function Combobox({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
+          id={id}
           type="button"
           variant="outline"
           role="combobox"
           aria-expanded={open}
+          aria-label={ariaLabel}
+          aria-invalid={ariaInvalid || undefined}
           disabled={disabled}
           className={cn('h-9 w-full justify-between px-3 font-normal', !selected && 'text-muted-foreground', className)}
         >

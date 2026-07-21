@@ -4,6 +4,7 @@ import { AlertCircle, ArrowRightLeft, Search } from 'lucide-react'
 import type { FlightSearchParams, TripType } from '@/api/fares'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Combobox } from '@/components/ui/combobox'
 import {
   Field,
   FieldContent,
@@ -14,11 +15,18 @@ import {
   FieldSet,
 } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { MultiSelect } from '@/components/ui/multi-select'
+import type { SelectOption } from '@/components/ui/option-types'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  AIRPORTS,
+  FLIGHT_LOCATIONS,
+  locationSearchTerms,
+} from '@/lib/airport-directory'
 import { dateFromToday, minutesToTime, timeToMinutes } from '@/lib/dates'
 import { defaultFlightSearchValues } from '@/lib/flight-search'
 
@@ -28,25 +36,105 @@ interface FlightSearchFormProps {
   onSubmit: (values: FlightSearchParams) => void
 }
 
-function normalizeCodeList(value: string | undefined): string | undefined {
-  const codes = value
+const LOCATION_OPTIONS: SelectOption[] = FLIGHT_LOCATIONS.map((location) => ({
+  value: location.code,
+  label: location.kind === 'city' ? location.name : `${location.city} · ${location.name}`,
+  description: `${location.country} · ${location.code}`,
+  keywords: locationSearchTerms(location),
+}))
+
+const AIRPORT_OPTIONS: SelectOption[] = AIRPORTS.map((location) => ({
+  value: location.code,
+  label: `${location.city} · ${location.name}`,
+  description: `${location.code} · ${location.country}`,
+  keywords: locationSearchTerms(location),
+}))
+
+const AIRLINE_OPTIONS: SelectOption[] = [
+  ['MU', '中国东方航空', 'China Eastern Airlines', ['东航', 'china eastern']],
+  ['FM', '上海航空', 'Shanghai Airlines', ['上航', 'shanghai airlines']],
+  ['CA', '中国国际航空', 'Air China', ['国航', 'air china']],
+  ['CZ', '中国南方航空', 'China Southern Airlines', ['南航', 'china southern']],
+  ['HO', '吉祥航空', 'Juneyao Air', ['吉祥', 'juneyao']],
+  ['9C', '春秋航空', 'Spring Airlines', ['春秋', 'spring airlines']],
+  ['NH', '全日空', 'All Nippon Airways', ['ANA', '全日本空输']],
+  ['JL', '日本航空', 'Japan Airlines', ['JAL', '日航']],
+  ['MM', '乐桃航空', 'Peach Aviation', ['peach', '乐桃']],
+  ['GK', '捷星日本', 'Jetstar Japan', ['jetstar', '捷星']],
+  ['IJ', '春秋航空日本', 'Spring Japan', ['spring japan']],
+  ['7G', '星悦航空', 'StarFlyer', ['starflyer', '星悦']],
+  ['BC', '天马航空', 'Skymark Airlines', ['skymark', '天马']],
+  ['KE', '大韩航空', 'Korean Air', ['korean air', '大韩']],
+  ['OZ', '韩亚航空', 'Asiana Airlines', ['asiana', '韩亚']],
+].map(([value, label, description, keywords]) => ({
+  value: value as string,
+  label: label as string,
+  description: `${description as string} · ${value as string}`,
+  keywords: keywords as string[],
+}))
+
+function splitCodes(value: string | undefined): string[] {
+  return value
     ?.split(',')
     .map((code) => code.trim().toUpperCase())
-    .filter(Boolean)
-  return codes?.length ? codes.join(',') : undefined
+    .filter(Boolean) || []
+}
+
+function normalizeCodeList(value: string | undefined): string | undefined {
+  const codes = splitCodes(value)
+  return codes.length ? codes.join(',') : undefined
+}
+
+function includeUnknownCodes(options: SelectOption[], values: string[]): SelectOption[] {
+  const known = new Set(options.map((option) => option.value))
+  const unknown = values
+    .filter((value) => !known.has(value))
+    .map((value) => ({ value, label: value, description: '已保存的代码' }))
+  return unknown.length ? [...unknown, ...options] : options
+}
+
+function includeUnknownLocation(options: SelectOption[], value: string): SelectOption[] {
+  return options.some((option) => option.value === value)
+    ? options
+    : [{ value, label: value, description: '已保存的城市或机场代码' }, ...options]
 }
 
 export function FlightSearchForm({ initialValues, submitting = false, onSubmit }: FlightSearchFormProps) {
   const defaults = useMemo(defaultFlightSearchValues, [])
   const [values, setValues] = useState<FlightSearchParams>({ ...defaults, ...initialValues })
   const [validationError, setValidationError] = useState('')
+  const selectedAirlines = splitCodes(values.airlineCodes)
+  const selectedDepartureAirports = splitCodes(values.departureAirports)
+  const selectedArrivalAirports = splitCodes(values.arrivalAirports)
+  const originOptions = useMemo(
+    () => includeUnknownLocation(LOCATION_OPTIONS, values.origin),
+    [values.origin],
+  )
+  const destinationOptions = useMemo(
+    () => includeUnknownLocation(LOCATION_OPTIONS, values.destination),
+    [values.destination],
+  )
 
   const update = <K extends keyof FlightSearchParams>(key: K, value: FlightSearchParams[K]) => {
     setValues((current) => ({ ...current, [key]: value }))
   }
 
   const swapAirports = () => {
-    setValues((current) => ({ ...current, origin: current.destination, destination: current.origin }))
+    setValues((current) => ({
+      ...current,
+      origin: current.destination,
+      destination: current.origin,
+      departureAirports: current.arrivalAirports,
+      arrivalAirports: current.departureAirports,
+    }))
+  }
+
+  const setDirectOnly = (checked: boolean) => {
+    setValues((current) => ({
+      ...current,
+      directOnly: checked,
+      maxStops: checked ? 0 : current.maxStops === 0 ? undefined : current.maxStops,
+    }))
   }
 
   const submit = (event: FormEvent) => {
@@ -54,7 +142,7 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
     const origin = values.origin.trim().toUpperCase()
     const destination = values.destination.trim().toUpperCase()
     if (!/^[A-Z]{3}$/.test(origin) || !/^[A-Z]{3}$/.test(destination) || origin === destination) {
-      setValidationError('请输入不同的出发机场和到达机场三字码。')
+      setValidationError('请选择不同的出发地和目的地。')
       return
     }
     if (!values.departureDate || (values.tripType === 'roundtrip' && !values.returnDate)) {
@@ -66,7 +154,7 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
       return
     }
     if (values.airlineCodes && values.airlineCodes.split(',').some((code) => !/^[A-Z0-9]{2,3}$/i.test(code.trim()))) {
-      setValidationError('航空公司代码请使用两到三位字母或数字，并用逗号分隔。')
+      setValidationError('航空公司筛选中包含无效代码。')
       return
     }
     if (!Number.isInteger(values.passengers) || values.passengers < 1 || values.passengers > 9) {
@@ -79,7 +167,7 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
     }
     const airportFilters = [values.departureAirports, values.arrivalAirports].filter(Boolean) as string[]
     if (airportFilters.some((value) => value.split(',').some((code) => !/^[A-Z]{3}$/i.test(code.trim())))) {
-      setValidationError('机场筛选请使用三位 IATA 代码，并用逗号分隔。')
+      setValidationError('机场筛选中包含无效代码。')
       return
     }
     if ((values.departureMinuteStart === undefined) !== (values.departureMinuteEnd === undefined)
@@ -110,24 +198,49 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
 
       <FieldSet>
         <FieldLegend>行程</FieldLegend>
-        <FieldGroup className="grid gap-4 md:grid-cols-[1fr_auto_1fr] md:items-end">
+        <FieldDescription>可以输入中文、拼音、英文或三字码搜索城市和机场。</FieldDescription>
+        <FieldGroup className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-start">
           <Field>
             <FieldLabel htmlFor="origin">出发地</FieldLabel>
-            <Input id="origin" value={values.origin} onChange={(event) => update('origin', event.target.value.toUpperCase())} maxLength={3} placeholder="SHA" required />
-            <FieldDescription>机场或城市三字码，例如 SHA / PVG</FieldDescription>
+            <Combobox
+              id="origin"
+              options={originOptions}
+              value={values.origin}
+              onValueChange={(value) => update('origin', value)}
+              ariaLabel="选择出发地"
+              placeholder="搜索城市或机场"
+              searchPlaceholder="例如：上海、浦东、Shanghai、PVG"
+              emptyText="没有找到匹配的出发地"
+              className="h-11"
+              contentClassName="min-w-[min(28rem,calc(100vw-2rem))]"
+            />
+            <FieldDescription>当前选择会自动转换为采集所需代码</FieldDescription>
           </Field>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button type="button" variant="outline" size="icon" className="mb-0.5" onClick={swapAirports} aria-label="交换出发地和目的地">
-                <ArrowRightLeft aria-hidden="true" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>交换出发地和目的地</TooltipContent>
-          </Tooltip>
+          <div className="flex justify-center md:pt-7">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="outline" size="icon" onClick={swapAirports} aria-label="交换出发地和目的地">
+                  <ArrowRightLeft aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>交换出发地和目的地</TooltipContent>
+            </Tooltip>
+          </div>
           <Field>
             <FieldLabel htmlFor="destination">目的地</FieldLabel>
-            <Input id="destination" value={values.destination} onChange={(event) => update('destination', event.target.value.toUpperCase())} maxLength={3} placeholder="TYO" required />
-            <FieldDescription>机场或城市三字码，例如 TYO / KIX</FieldDescription>
+            <Combobox
+              id="destination"
+              options={destinationOptions}
+              value={values.destination}
+              onValueChange={(value) => update('destination', value)}
+              ariaLabel="选择目的地"
+              placeholder="搜索城市或机场"
+              searchPlaceholder="例如：东京、成田、Tokyo、NRT"
+              emptyText="没有找到匹配的目的地"
+              className="h-11"
+              contentClassName="min-w-[min(28rem,calc(100vw-2rem))]"
+            />
+            <FieldDescription>东京、大阪等城市会同时搜索其主要机场</FieldDescription>
           </Field>
         </FieldGroup>
 
@@ -160,28 +273,37 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
 
       <FieldSet>
         <FieldLegend>筛选条件</FieldLegend>
-        <Field orientation="horizontal" className="rounded-md border bg-muted/30 px-3 py-2">
+        <FieldDescription>这些条件只用于缩小结果范围，不需要填写任何代码。</FieldDescription>
+        <Field orientation="horizontal" className="rounded-md border bg-muted/30 px-3 py-3">
           <FieldContent>
-            <FieldLabel htmlFor="direct-only">仅直飞</FieldLabel>
-            <FieldDescription>只保留没有中转段的行程</FieldDescription>
+            <FieldLabel htmlFor="direct-only">仅看直飞</FieldLabel>
+            <FieldDescription>开启后只显示没有换乘航段的行程</FieldDescription>
           </FieldContent>
-          <Switch id="direct-only" checked={values.directOnly} onCheckedChange={(checked) => update('directOnly', checked)} />
+          <Switch id="direct-only" checked={values.directOnly} onCheckedChange={setDirectOnly} />
         </Field>
 
         <FieldGroup className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Field>
             <FieldLabel htmlFor="airline-codes">航空公司</FieldLabel>
-            <Input id="airline-codes" value={values.airlineCodes || ''} onChange={(event) => update('airlineCodes', event.target.value.toUpperCase())} placeholder="MU,NH" />
-            <FieldDescription>可填多个 IATA 代码</FieldDescription>
+            <MultiSelect
+              id="airline-codes"
+              ariaLabel="筛选航空公司"
+              options={includeUnknownCodes(AIRLINE_OPTIONS, selectedAirlines)}
+              value={selectedAirlines}
+              onValueChange={(next) => update('airlineCodes', next.length ? next.join(',') : undefined)}
+              placeholder="不限航空公司"
+              searchPlaceholder="搜索航司中文名或英文名"
+              maxPreviewItems={1}
+            />
           </Field>
           <Field>
             <FieldLabel htmlFor="max-price">结果最高价（元）</FieldLabel>
             <Input id="max-price" type="number" min="0" step="1" value={values.maxPriceMinor === undefined ? '' : values.maxPriceMinor / 100} onChange={(event) => update('maxPriceMinor', event.target.value ? Math.round(Number(event.target.value) * 100) : undefined)} placeholder="不限" />
-            <FieldDescription>过滤高于此金额的报价，不会触发通知</FieldDescription>
+            <FieldDescription>只影响结果展示，不会触发通知</FieldDescription>
           </Field>
-          <Field>
+          <Field data-disabled={values.directOnly || undefined}>
             <FieldLabel htmlFor="max-stops">最多中转</FieldLabel>
-            <Select value={values.maxStops === undefined ? 'any' : String(values.maxStops)} onValueChange={(value) => update('maxStops', value === 'any' ? undefined : Number(value))}>
+            <Select disabled={values.directOnly} value={values.maxStops === undefined ? 'any' : String(values.maxStops)} onValueChange={(value) => update('maxStops', value === 'any' ? undefined : Number(value))}>
               <SelectTrigger id="max-stops"><SelectValue /></SelectTrigger>
               <SelectContent><SelectGroup><SelectItem value="any">不限</SelectItem><SelectItem value="0">直飞</SelectItem><SelectItem value="1">最多 1 次</SelectItem><SelectItem value="2">最多 2 次</SelectItem><SelectItem value="3">最多 3 次</SelectItem></SelectGroup></SelectContent>
             </Select>
@@ -195,21 +317,44 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
           </Field>
         </FieldGroup>
 
-        <FieldGroup className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <FieldGroup className="grid gap-4 lg:grid-cols-2">
           <Field>
-            <FieldLabel htmlFor="departure-airports">出发机场</FieldLabel>
-            <Input id="departure-airports" value={values.departureAirports || ''} onChange={(event) => update('departureAirports', event.target.value.toUpperCase())} placeholder="SHA,PVG" />
+            <FieldLabel htmlFor="departure-airports">指定出发机场</FieldLabel>
+            <MultiSelect
+              id="departure-airports"
+              ariaLabel="筛选出发机场"
+              options={includeUnknownCodes(AIRPORT_OPTIONS, selectedDepartureAirports)}
+              value={selectedDepartureAirports}
+              onValueChange={(next) => update('departureAirports', next.length ? next.join(',') : undefined)}
+              placeholder="不限具体机场"
+              searchPlaceholder="例如：浦东、虹桥、PVG"
+              maxPreviewItems={2}
+              contentClassName="min-w-[min(30rem,calc(100vw-2rem))]"
+            />
           </Field>
           <Field>
-            <FieldLabel htmlFor="arrival-airports">到达机场</FieldLabel>
-            <Input id="arrival-airports" value={values.arrivalAirports || ''} onChange={(event) => update('arrivalAirports', event.target.value.toUpperCase())} placeholder="NRT,HND" />
+            <FieldLabel htmlFor="arrival-airports">指定到达机场</FieldLabel>
+            <MultiSelect
+              id="arrival-airports"
+              ariaLabel="筛选到达机场"
+              options={includeUnknownCodes(AIRPORT_OPTIONS, selectedArrivalAirports)}
+              value={selectedArrivalAirports}
+              onValueChange={(next) => update('arrivalAirports', next.length ? next.join(',') : undefined)}
+              placeholder="不限具体机场"
+              searchPlaceholder="例如：成田、羽田、NRT"
+              maxPreviewItems={2}
+              contentClassName="min-w-[min(30rem,calc(100vw-2rem))]"
+            />
           </Field>
+        </FieldGroup>
+
+        <FieldGroup className="grid gap-4 sm:grid-cols-2">
           <Field>
-            <FieldLabel htmlFor="departure-start">出发时间起</FieldLabel>
+            <FieldLabel htmlFor="departure-start">最早出发时间</FieldLabel>
             <Input id="departure-start" type="time" value={minutesToTime(values.departureMinuteStart)} onChange={(event) => update('departureMinuteStart', timeToMinutes(event.target.value))} />
           </Field>
           <Field>
-            <FieldLabel htmlFor="departure-end">出发时间止</FieldLabel>
+            <FieldLabel htmlFor="departure-end">最晚出发时间</FieldLabel>
             <Input id="departure-end" type="time" value={minutesToTime(values.departureMinuteEnd)} onChange={(event) => update('departureMinuteEnd', timeToMinutes(event.target.value))} />
           </Field>
         </FieldGroup>
@@ -223,8 +368,8 @@ export function FlightSearchForm({ initialValues, submitting = false, onSubmit }
         </Alert>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <Button type="submit" disabled={submitting}>
+      <div className="flex justify-end">
+        <Button type="submit" className="w-full sm:w-auto" disabled={submitting}>
           <Search data-icon="inline-start" aria-hidden="true" />
           {submitting ? '查询中…' : '查询价格'}
         </Button>

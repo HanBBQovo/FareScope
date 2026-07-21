@@ -63,16 +63,42 @@ export interface FlightSearchParams {
   departureMinuteEnd?: number
 }
 
+export interface FlightSegment {
+  position: number
+  flightNumber: string
+  operatingFlightNumber: string | null
+  airline: string
+  airlineName: string | null
+  origin: string
+  originName: string
+  originTerminal: string | null
+  destination: string
+  destinationName: string
+  destinationTerminal: string | null
+  departureAt: string
+  arrivalAt: string
+  departureLocal: string
+  arrivalLocal: string
+  departureTimezone: string
+  arrivalTimezone: string
+  durationMinutes: number
+  technicalStopCount: number
+  aircraftCode: string | null
+}
+
 export interface FlightLeg {
   direction: 'outbound' | 'inbound'
   flightNumber: string
   airline: string
   origin: string
+  originName: string
   destination: string
+  destinationName: string
   departureAt: string
   arrivalAt: string
   stops: number
   durationMinutes: number
+  segments: FlightSegment[]
 }
 
 export interface FlightOffer {
