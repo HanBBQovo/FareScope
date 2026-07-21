@@ -1,238 +1,310 @@
 # FareScope Living Project Plan
 
-Last updated: 2026-07-20
+Last updated: 2026-07-21
 
-Status: Foundation
+Status: Core product operational locally; target-server and long-history gates remain.
 
-This file is the authoritative product scope, data evidence matrix, architecture record, implementation checklist, and progress log. It must be updated in the same commit as every material implementation change.
+This is the authoritative product scope, evidence record, architecture decision, implementation
+checklist, and progress log. Every material implementation change must update this file in the same
+commit. A checkbox means source, persistence, API, UI, and tests are present where applicable; it
+does not mean an upstream provider will return every data class for every route on every attempt.
 
 ## Status legend
 
-- `verified`: observed in a real upstream response and reproducible.
-- `needs verification`: plausible, but the exact upstream fields or behavior have not been proven.
-- `history dependent`: implementable only after FareScope has accumulated sufficient observations.
-- `blocked`: cannot be promised without another authorized data source.
-- `implemented`: complete across collection, persistence, API, UI, and tests.
+- `verified`: observed in a real response or measured against the running system.
+- `implemented`: source, persistence, API, UI, and tests are complete for the stated boundary.
+- `needs verification`: code exists or the capability is plausible, but required live evidence is
+  still missing.
+- `history dependent`: meaningful only after FareScope accumulates enough observations.
+- `blocked`: cannot be promised without another authorized source or external state change.
 
 ## Product definition
 
-FareScope is a self-hosted airfare data and decision platform. It is not merely a notification utility. The system must preserve detailed observations, expose current itineraries and fare history, explain data freshness, evaluate user-specific alert rules, and remain extensible to additional providers.
+FareScope is a self-hosted airfare data and decision platform, not only a notification script. It
+stores normalized observations, exposes current and historical fare data, makes data freshness and
+partial-provider responses visible, shares identical collection work across users, and evaluates
+owner-scoped alert rules with durable delivery history.
 
-## Confirmed requirements
+The product focus is airfare data. Account functionality is deliberately minimal.
 
-- Server-hosted Web application; no desktop GUI dependency.
-- Frontend derived from `/Users/hanhan/Desktop/code/frontend-template/web`.
-- One-way and round-trip searches.
-- Direct-flight filtering plus airline, airport, time, duration, stop, cabin, and passenger filters when supported by verified fields.
-- Multiple routes, multiple travel dates, flexible-date searches, and city or airport codes.
-- Current prices, detailed itinerary results, historical price trends, and collection health.
-- Persistent subscriptions, alerts, notification delivery history, retries, and deduplication.
-- Multiple users in the future, each owning subscriptions and notification channels.
-- Advanced analytics are allowed only after their data prerequisites are verified.
+## Confirmed product requirements
 
-## User model decision
+- Server-hosted Web application with no desktop GUI dependency.
+- React frontend derived from `/Users/hanhan/Desktop/code/frontend-template/web`.
+- One-way and round-trip searches with direct, airline, airport, price, stop, duration, time, cabin,
+  and passenger constraints where normalized fields support them.
+- Persistent current fares, itinerary details, price history, low-fare calendars, round-trip date
+  matrices, collection health, subscriptions, alerts, and delivery attempts.
+- Multiple users may register and own independent subscriptions, rules, and notification channels.
+- Identical collection queries are canonicalized and collected once for all interested users.
+- Advanced recommendations are enabled only after their evidence and sample-size gates are met.
 
-FareScope will retain a minimal multi-user foundation from the beginning:
+## Minimal user model
 
-- Users authenticate and own subscriptions, alert rules, saved views, and notification channels.
-- Collection queries are canonicalized and deduplicated across users so identical searches do not multiply upstream traffic.
-- Initial roles are only `admin` and `member`; enterprise organizations, teams, and granular RBAC are deferred.
-- Initial onboarding is admin-created invitations rather than open public registration.
-- Secrets such as notification tokens are encrypted at rest and never returned in full after creation.
+- Registration and login require only a username and password.
+- Passwords require at least 4 characters and have no composition rule or confirmation field.
+- Email is not an account identity and there is no email verification flow.
+- There is no invitation, organization, team, member-management, or granular-role product surface.
+- The internal admin marker exists only for bootstrap and operational work.
+- Public registration can be disabled by deployment configuration.
+- Notification destinations are encrypted at rest and never returned in full.
+- Every subscription, alert rule, event, and notification channel query is owner-scoped.
 
-This avoids unnecessary enterprise permission work while preventing a future single-user schema migration.
+## Current upstream evidence
 
-## Empirical upstream evidence
-
-The following observations were made on 2026-07-20 from the current development network:
+Evidence below was collected on 2026-07-20/21 from the current development network using fresh
+browser contexts without a personal profile, stored cookies, or challenge bypass.
 
 | Capability or behavior | Status | Evidence |
-|---|---|---|
-| Legacy `lowestPrice` domestic calendar | verified | Headed Chrome returned a populated `oneWayPrice` list for `SHA-BJS`. |
-| Legacy `lowestPrice` international calendar | verified unavailable | `SHA-TYO`, `PVG-NRT`, and `PVG-KIX` returned `status: 0` with `oneWayPrice: null`. |
-| Plain Python HTTP collection | blocked | Requests with system proxy, direct egress, and browser-like headers all returned HTTP 432 `whaleguard block`. |
-| Fresh headed Chrome session | verified | A temporary Chrome context returned HTTP 200 without reusing personal Chrome cookies. |
-| Headless Chrome | blocked in current test | The same route returned HTTP 432 and emitted no price response. |
-| International flexible-date calendar | verified | `FlightIntlAndInlandLowestPriceSearch` returned 366 price entries with departure date and price fields. |
-| Detailed international itineraries | verified | `batchSearch` returned flight numbers, airlines, airports, times, transfers, duration, and fare structures. |
-| Round-trip date combinations | verified at response level | The calendar endpoint returned departure/return date pairs when the page requested round-trip calendar data. Normalization is not implemented. |
-| Direct-only request semantics | needs verification | The observed request contains a `directFlight` field, but the true direct-only page interaction still needs a captured fixture and result comparison. |
-| Baggage and refund rules | needs verification | Detailed response analysis has not yet established stable fields and meanings. |
-| On-time performance | blocked | No verified source exists in the captured fare responses. |
+| --- | --- | --- |
+| Plain HTTP request to the legacy endpoint | blocked | Browser-like Python requests returned HTTP 432 `whaleguard block`. |
+| Standard headed Google Chrome | verified | Fresh contexts received HTTP 200 page-generated API responses. |
+| Bundled Chromium on the same path | unreliable | It has returned HTTP 432 in the current environment; it remains an explicit fallback only. |
+| One-way international calendar | verified | Live capture plus a redacted calendar fixture normalize departure dates and prices. |
+| Round-trip calendar/date pairs | verified | Live `SHA-TYO` collection produced 1,130 latest date-pair snapshots per attempt; the redacted fixture covers total-price semantics. |
+| Detailed one-way itineraries | verified conditionally | Redacted `batchSearch` fixture covers flights, airports, times, stops, duration, cabin, and total price. |
+| Detailed round-trip itineraries | verified conditionally | A live `NKG-BJS` probe normalized 27 itineraries with two ordered legs; a redacted two-leg fixture protects the contract. |
+| Detailed `SHA-TYO` results on the latest run | partial | Three bounded attempts returned calendar plus context-only detail responses and zero itineraries. FareScope stored the calendar and reported `partial_fare_data`. |
+| Direct-result filtering | implemented locally | Directness is derived from normalized segments and applied to stored offers; a provider-UI direct-only capture comparison is still pending. |
+| Baggage/refund rules | needs verification | Stable fields and semantics have not been established. |
+| On-time performance | blocked | No authorized operational-flight source is present in captured fare responses. |
+| Target server egress | needs verification | Local Chrome success is not evidence that the eventual data-center IP receives the same responses. |
 
-## Feature feasibility gates
+The completed live `SHA-TYO` run used three bounded attempts, stored 3,390 real calendar
+observations and 1,130 latest snapshots, ended `success_with_warnings`, released its lease, and
+stored zero raw response artifacts. It did not fabricate itinerary offers.
 
-| Feature | Feasibility | Required evidence before implementation claim |
-|---|---|---|
-| Current route/date lowest price | verified | Redacted calendar fixture and parser contract tests. |
-| Detailed flight result table | verified | Redacted `batchSearch` fixture and itinerary normalization tests. |
-| Price history and charts | verified after collection begins | Stored observations across time with deduplication and freshness metadata. |
-| Round-trip price matrix | needs normalization proof | Fixture covering departure/return pairs and total-price semantics. |
-| Direct-flight filter | needs verification | Captured page request with filter enabled and result-level directness checks. |
-| Historical-low and percentage-drop alerts | history dependent | Sufficient observations for the selected comparison window. |
-| Price anomaly detection | history dependent | Defined baseline window, minimum sample count, and false-positive tests. |
-| Buy-now or wait recommendation | history dependent | At least 90 days of route/date-horizon observations and calibrated confidence reporting. |
-| Seasonality and advance-purchase analysis | history dependent | At least one meaningful seasonal cycle; never fabricate before that point. |
-| Destination discovery under a budget | needs verification | Bounded route universe, rate budget, and successful batch collection strategy. |
-| On-time risk scoring | blocked | Additional authorized operational flight data source. |
-| Multi-provider comparison | blocked for initial release | At least one additional provider adapter and comparable price semantics. |
+## Feature evidence gates
 
-## Architecture decision
+| Feature | Current state | Gate or limitation |
+| --- | --- | --- |
+| Current detailed fare table | implemented | Visible when the provider returns normalized detailed offers; otherwise shows a real empty/partial state. |
+| Low-fare calendar | implemented | Uses latest date-pair snapshots with keyset pagination. |
+| Price history and charts | implemented | Meaning grows as repeated detailed price observations accumulate. |
+| Round-trip matrix | implemented | Uses verified departure/return date pairs and total minor-unit prices. |
+| Threshold/drop/new-low/direct alerts | implemented | History-based rules require prior detailed observations to trigger meaningfully. |
+| Anomaly detection | history dependent | Requires a defined baseline and minimum sample count. |
+| Buy-now/wait guidance | history dependent | Requires at least 90 days of suitable horizon data and calibrated confidence. |
+| Seasonality analysis | history dependent | Requires at least one meaningful seasonal cycle. |
+| Budget destination discovery | needs verification | Requires a bounded route universe and proven collection-rate budget. |
+| Multi-provider comparison | blocked for initial release | Requires another authorized adapter and comparable price semantics. |
 
-FareScope is a modular monolith with separate runtime processes:
+## Architecture
+
+FareScope is a modular monolith with isolated runtime processes:
 
 - `web`: Vite, React, TypeScript, Tailwind, shadcn/Radix, Lucide, and Recharts.
-- `api`: FastAPI REST APIs, authentication, query APIs, and Server-Sent Events.
-- `scheduler`: scans due canonical searches and dispatches jobs.
-- `collector`: headed Chrome under a virtual display, with provider-specific adapters.
-- `analysis`: aggregations, derived metrics, and alert evaluation.
-- `notification`: channel delivery, retries, cooldowns, and deduplication.
-- PostgreSQL: source of truth; observation tables will use time-based partitioning.
-- Redis: Celery broker, short-lived cache, rate-limit state, and distributed locks.
+- `api`: FastAPI async REST API, cookie sessions, owner checks, bounded reads/writes, readiness,
+  and request IDs. It never launches browsers.
+- `scheduler`: singleton Celery Beat plus short PostgreSQL scheduler transactions.
+- `collector`: dedicated headed Google Chrome/Xvfb Celery worker and provider adapters.
+- `analysis`: collection-result aggregation and alert evaluation queue.
+- `notification`: durable delivery claims, network sends, retry, and audit queue.
+- PostgreSQL 16: source of truth, monthly range partitions, latest snapshots, and aggregates.
+- Redis: Celery broker/result state; never the only copy of business data.
+- PgBouncer: production transaction-pooling boundary.
 
-Provider collection must remain replaceable. The API process must never launch browsers.
-Browser automation dependencies are installed through the server's `collector` extra so API,
-analysis, notification, and ordinary CI environments do not carry the browser runtime.
+Provider adapters and browser dependencies are isolated from the API package boundary. Browser or
+notification network I/O never occurs inside a database transaction. API and background process
+pool sizes, statement timeouts, keyset pagination, and query limits are explicit.
 
 ## Collection pipeline
 
-1. A user creates a subscription or runs an on-demand search.
-2. The API normalizes its legs, dates, passengers, cabin, and filters into a canonical query hash.
-3. The scheduler groups users sharing that hash and creates one collection job.
-4. A collector leases the job, opens the provider search page, and captures page-generated responses.
-5. Raw payload metadata is recorded; short-lived raw bodies may be compressed in artifact storage after redaction.
-6. Normalizers write collection runs, itineraries, segments, offers, and price observations transactionally.
-7. Analysis jobs update daily aggregates and evaluate alert rules.
-8. Notification jobs persist every delivery attempt before sending.
-9. SSE notifies connected Web clients about fresh observations and job state.
+1. A user creates a subscription or submits an on-demand search.
+2. The API validates and canonicalizes provider, trip, legs, passengers, cabin, and upstream
+   filters into a stable query hash.
+3. The scheduler groups due subscriptions by canonical query and creates an idempotent run.
+4. A short dispatch lease is committed before the Celery message is published.
+5. The collector fences the lease, enters provider/route concurrency and pacing gates, then opens
+   a fresh headed Chrome context.
+6. Page-generated responses are captured by allowlisted routes; richer repeated responses replace
+   context-only envelopes during a bounded settle period.
+7. Calendar, itinerary, segment, offer, observation, schema, and latest-snapshot rows are persisted
+   transactionally with minor-unit money and UTC timestamps.
+8. Retryable network or partial-detail outcomes return to `pending` with bounded exponential
+   backoff and jitter. Attempts are capped; calendar-only data remains usable.
+9. Analysis evaluates owner rules exactly once per successful run and creates durable events.
+10. Notification workers claim deliveries with `SKIP LOCKED`, send outside the transaction, and
+    record success or bounded retry state.
 
-## Planned core entities
+The current gate coordinates one collector process. Multiple collector processes or hosts must use
+conservative per-process limits until a shared rate-limit coordinator is implemented.
 
-- `users`, `sessions`, `invitations`, `audit_events`
-- `airports`, `cities`, `providers`
-- `search_queries`, `search_legs`, `subscriptions`, `subscription_filters`
-- `collection_runs`, `collection_artifacts`, `schema_observations`
-- `itineraries`, `segments`, `flights`, `fare_offers`
-- `price_observations`, `daily_price_aggregates`
-- `alert_rules`, `alert_events`
-- `notification_channels`, `notification_deliveries`
+## Implemented data model
 
-Money is stored in integer minor units with currency. Timestamps are stored in UTC, while airport-local timestamps retain their IANA time-zone context. Stable itinerary fingerprints are separate from changing fare offers.
+- Identity: `users`, `sessions`, `audit_events`.
+- Search ownership: `providers`, `search_queries`, `search_legs`, `subscriptions`,
+  `subscription_filters`.
+- Collection: `collection_runs`, `collection_artifacts`, `schema_observations`.
+- Fares: `itineraries`, `segments`, `fare_offers`, partitioned `price_observations`, latest price
+  snapshots, partitioned calendar observations, latest calendar snapshots, daily aggregates.
+- Alerts: `alert_rules`, rule-channel links, `alert_events`, `notification_channels`, and
+  `notification_deliveries`.
 
-## Planned Web information architecture
+Money uses integer minor units plus currency. Timestamps use UTC. Provider-local timestamps retain
+their time-zone context. A notification target price is separate from a result maximum-price
+filter; a target must never hide the current price it is meant to monitor.
 
-- Overview: system freshness, active watches, recent lows, collection health, and notable changes.
-- Subscriptions: create, clone, pause, tag, filter, and inspect per-user watches.
-- Fare explorer: ad-hoc one-way or round-trip search with flexible dates.
-- Route detail: latest, history, fare calendar, round-trip matrix, itineraries, and data quality tabs.
-- Compare: airports, destinations, airlines, dates, and saved route groups.
-- Alerts: rules, trigger timeline, suppressed events, and delivery attempts.
-- Data explorer: normalized observations, raw artifact metadata, exports, and retention.
-- Operations: collector workers, queue depth, run history, schema drift, failures, and retries.
-- Settings: profile, notification channels, collection policy, retention, and system configuration.
+## Implemented Web product
 
-The template shell and semantic components remain. Formal routing and a server-state query layer will be introduced when the first business routes are implemented.
+- Username/password registration and login.
+- Overview with real subscription counts, route counts, collection success, 30-day trend, and
+  recent price change when detailed observations exist.
+- Fare explorer with one-way/round-trip forms, direct and local result filters, polling collection
+  state, detailed leg cards, and keyset result pagination.
+- Subscription creation, pause/resume, delete, independent result/target prices, freshness, and
+  latest observed price.
+- Price history with raw/hour/day resolution, low-fare calendar, and round-trip matrix.
+- Alert rule creation, channel selection, enable/disable, delete, event pagination, and delivery
+  audit.
+- Webhook, Telegram, Bark, and PushPlus channel creation/toggle with encrypted secrets.
+- Collection operations page with health, pagination, attempts, calendar/itinerary/offer counts,
+  upstream status, errors, and explicit calendar-only warnings.
+- Loading, empty, error, stale, unavailable, and responsive layouts. Demo fare fallback is removed.
 
-## Alert rules planned
+The production bundle uses explicit vendor chunks. The main entry fell from about 533 kB to about
+182 kB uncompressed in the current build; the largest chunk is about 404 kB and the build emits no
+large-chunk warning.
 
-- Current price at or below a fixed target.
-- Absolute or percentage drop from the last notified baseline.
-- New low over 7, 30, 90, or all retained days.
-- Direct itinerary becomes available under a threshold.
-- Matching airline, airport, departure window, duration, or stop constraint becomes available.
-- Round-trip total enters a target range.
-- Data becomes stale or a provider schema changes.
+## Performance evidence
 
-Rules include cooldown, quiet hours, severity, deduplication key, retry policy, and enabled notification channels. Failed delivery never advances the delivered baseline.
+The reproducible PostgreSQL 16 reference profile contains 500 users, 6,000 subscriptions with
+filters, 2,000 canonical queries, 7,000 runs, 40,000 itineraries/offers, 71,982 segments, 60,000
+calendar snapshots, and 480,000 price observations.
+
+Three warm local runs measured:
+
+- filtered search count + page + segments: 0.217-0.630 ms total SQL execution;
+- raw history: 0.258-0.452 ms; daily history: 0.259-0.417 ms;
+- one-way calendar: 0.080-0.126 ms; round-trip calendar: 0.029-0.036 ms;
+- 12-route dashboard latest: 1.465-2.404 ms; trend: 7.965-9.511 ms;
+- collection health: 0.263-0.369 ms; run page: about 0.199 ms.
+
+At the hard 100-route dashboard limit, latest and trend application requests measured about 109 ms
+and 127 ms. This is within the current local target but scales linearly, so the limit must not be
+raised without a snapshot/aggregate redesign. The 14.4-million-observation large profile,
+concurrent clients, cold-cache behavior, and production hardware remain unverified. See
+`docs/PERFORMANCE.md` for the full contract and reproduction commands.
 
 ## Roadmap
 
 ### M0: Repository foundation
 
-- [x] Create and connect the `HanBBQovo/FareScope` repository.
-- [x] Derive `web/` from the approved frontend template.
-- [x] Add the living project plan and repository instructions.
-- [x] Add the FastAPI liveness skeleton and Celery application entrypoint.
-- [x] Add PostgreSQL and Redis development services.
-- [x] Add baseline frontend and backend CI jobs.
-- [ ] Review and migrate the template from unsupported Recharts 2 to Recharts 3 without visual regressions.
-- [x] Verify local server tests, frontend lint/build, and Compose configuration.
+- [x] Repository, frontend template, instructions, CI code checks, local Compose, and living plan.
+- [x] FastAPI, Celery, PostgreSQL, Redis, migrations, production-shaped Compose, and process docs.
+- [x] Full local backend/frontend checks and Compose parsing.
+- [ ] Migrate Recharts 2 to Recharts 3 with screenshot regression verification.
 
-### M1: Data-source proof on the target server
+### M1: Provider collection proof
 
-- [ ] Build a collector runtime with headed Chrome and Xvfb.
-- [ ] Verify the target server IP can load the international search page repeatedly.
-- [ ] Capture and redact stable one-way, round-trip, direct-only, and detailed-itinerary fixtures.
-- [ ] Define schema-drift detection and failure screenshots.
-- [ ] Establish per-route rate limits, jitter, backoff, and concurrency limits.
-- [ ] Decide the fallback if the server egress is blocked: authorized provider or separately deployed collector node.
+- [x] Headed Chrome/Xvfb runtime with explicit Chromium fallback and startup smoke checks.
+- [x] Redacted one-way, round-trip, and detailed itinerary fixtures with parser contracts.
+- [x] Schema diagnostics, optional failure screenshots, partial-data states, and no raw-body default.
+- [x] Provider/route concurrency, pacing, jitter, retry backoff, leases, and fencing.
+- [x] Scheduler-to-dispatch-to-collector-to-PostgreSQL integration tests.
+- [ ] Capture and compare a provider-UI direct-only interaction fixture.
+- [ ] Verify repeated live collection from the target server IP.
+- [ ] Add shared cross-process/host rate coordination before horizontally scaling collectors.
 
-### M2: Persistence and collection core
+### M2: Persistence and price APIs
 
-- [ ] Add PostgreSQL models, Alembic migrations, and monthly observation partitions.
-- [ ] Implement canonical query hashing and cross-user collection deduplication.
-- [ ] Implement the Ctrip collector adapter from verified fixtures.
-- [ ] Normalize calendar, itinerary, segment, and offer data.
-- [ ] Add collection run state, leases, retries, and idempotency.
-- [ ] Add retention, redaction, and raw artifact policies.
+- [x] Canonical query deduplication, monthly partitions, latest snapshots, and migrations through
+  `20260720_0010`.
+- [x] Calendar, itinerary, segment, offer, raw history, aggregate history, and collection health.
+- [x] Owner-scoped keyset pagination and bounded hot queries.
+- [x] Independent result filters and notification target prices.
+- [x] Reference-scale data generator, service-SQL profiler, and saved performance contract.
+- [ ] Automated partition retention/archive jobs and configurable retention controls.
+- [ ] Run the large profile with concurrency and cold-cache evidence.
 
-### M3: Multi-user product foundation
+### M3: Minimal multi-user foundation
 
-- [ ] Implement admin bootstrap, invitation, login, logout, and secure cookie sessions.
-- [ ] Implement `admin` and `member` authorization boundaries.
-- [ ] Implement per-user subscriptions and notification channels.
-- [ ] Add audit events for authentication, configuration, and destructive actions.
+- [x] Username-only public registration, login, logout, secure cookies, CSRF, and session hashes.
+- [x] Four-character minimum password with no confirmation, email, or invitation workflow.
+- [x] Per-user subscription, alert, channel, event, and delivery isolation.
+- [x] Encrypted notification secrets and authentication/configuration audit events.
+- [x] Request IDs and dependency-aware readiness checks.
 
 ### M4: Core Web product
 
-- [ ] Add formal routes and server-state query management to the frontend.
-- [ ] Implement subscription management and fare explorer.
-- [ ] Implement route latest-price, itinerary, history, and calendar pages.
-- [ ] Implement the round-trip price matrix and route comparison.
-- [ ] Add SSE freshness and collection-status updates.
-- [ ] Add responsive desktop and mobile verification.
+- [x] Formal lazy routes and TanStack Query server-state layer.
+- [x] Subscription, fare explorer, latest offer, history, calendar, and matrix workflows.
+- [x] Alert and notification management plus collection operations/data-quality views.
+- [x] Cursor pagination, collection polling, real empty/error/stale states, and vendor chunking.
+- [ ] Screenshot-level desktop/mobile visual verification when a browser-control session is
+  available.
+- [ ] Replace polling with optional SSE for faster collection-state updates.
+- [ ] Add saved cross-route comparison views.
 
 ### M5: Alerts, reporting, and operations
 
-- [ ] Implement rule evaluation and durable alert events.
-- [ ] Add PushPlus, email, Telegram, Bark, and Webhook adapters as separately testable channels.
-- [ ] Add retry, cooldown, quiet hours, and delivery audit.
-- [ ] Add CSV/JSON exports, retention controls, and backup documentation.
-- [ ] Add collector health, queue, run, schema-drift, and retry views.
+- [x] Threshold, absolute/percentage drop, new-low, direct, and round-trip range evaluation.
+- [x] Durable event/delivery deduplication, cooldown, `SKIP LOCKED` claims, bounded retries, and
+  delivery audit.
+- [x] PushPlus, Telegram, Bark, and HTTPS Webhook adapters with tests.
+- [x] Collection health, run history, retry, upstream status, and partial-data UI.
+- [ ] Quiet hours and per-channel delivery schedules.
+- [ ] Optional email delivery after an SMTP backend is configured; email remains unrelated to login.
+- [ ] Background CSV/JSON exports and retention controls.
+- [ ] Schema-drift detail UI, queue-depth metrics, and automated backup/restore drill.
 
 ### M6: Evidence-gated intelligence
 
-- [ ] Add anomaly detection after minimum sample thresholds are met.
-- [ ] Add advance-purchase and seasonality analysis after sufficient history exists.
-- [ ] Add buy-or-wait guidance only with calibrated confidence and transparent evidence.
-- [ ] Add budget destination discovery after rate and coverage feasibility are proven.
-- [ ] Add multi-provider comparison only after another authorized adapter exists.
+- [ ] Anomaly detection after minimum sample thresholds are met.
+- [ ] Advance-purchase and seasonality analysis after sufficient history exists.
+- [ ] Buy-or-wait guidance only with calibrated confidence and transparent evidence.
+- [ ] Budget destination discovery after coverage and rate feasibility are proven.
+- [ ] Multi-provider comparison only after another authorized adapter exists.
 
-## Definition of done for a feature
+### M7: Production acceptance
 
-A feature is complete only when all applicable items are satisfied:
+- [ ] Verify the actual target host egress and tune collector policy there.
+- [ ] Complete large/concurrent/cold-cache performance testing on production-like hardware.
+- [ ] Complete restore drill, secret rotation, monitoring, and security review.
+- [ ] Build/deploy Docker images when registry/build quota is available. Code and Compose checks do
+  not depend on this step.
 
-- Upstream data fields and semantics are verified with redacted fixtures.
-- Normalization and persistence are implemented with idempotency.
-- API contracts and authorization boundaries are tested.
-- UI includes loading, empty, stale, error, and mobile states.
-- Metrics, logs, and collection-run traceability exist.
-- Documentation, roadmap checkbox, and progress log are updated.
+## Definition of done
+
+A feature is complete only when all applicable items are true:
+
+- Upstream fields and semantics are backed by live evidence or a redacted fixture.
+- Normalization and persistence are idempotent or explicitly model repeated real observations.
+- API contracts, bounds, ownership, cursors, and failure states are tested.
+- UI handles loading, empty, stale, partial, error, and mobile states.
+- Queries have appropriate indexes, bounded plans, and representative performance evidence.
+- Metrics/logs, request or run traceability, and operational recovery behavior exist.
+- Documentation and this progress checklist are updated with the implementation.
 
 ## Progress log
 
 ### 2026-07-20
 
-- Created the new FareScope repository from the empty GitHub remote.
-- Copied the approved frontend template without altering its shadcn preset.
-- Chose a modular-monolith architecture with isolated runtime processes.
-- Chose a minimal multi-user model rather than a single-user schema or enterprise RBAC.
-- Recorded empirical Ctrip data capabilities and explicitly gated unsupported advanced features.
-- Added initial API, Celery, PostgreSQL, Redis, CI, and project-governance scaffolding.
-- Verified Ruff, Pytest, frontend ESLint, frontend production build, Compose parsing, and Git patch formatting.
-- Isolated Playwright in a dedicated `collector` dependency extra so non-collector processes remain lightweight.
-- Recorded the template's Recharts 2 end-of-support warning as an explicit M0 migration task.
-- Pushed commit `3243ab9` to `origin/main`; GitHub CI run `29714688524` completed successfully.
-- Upgraded official GitHub Actions to their current v7 releases after CI exposed Node 20 runtime deprecation warnings.
-- Pinned `setup-python` to its exact `v7.0.0` tag because that action did not publish the floating `v7` tag used by the other official actions.
-- Verified the corrected action versions in GitHub CI run `29714870571`; both server and web jobs passed without the Node 20 deprecation warning.
+- Created the repository, copied the approved frontend template, and selected a process-isolated
+  modular monolith.
+- Added FastAPI, Celery, PostgreSQL, Redis, migrations, CI code checks, and deployment topology.
+- Implemented username/password identity and removed invitations/email login.
+- Simplified registration to two fields only and reduced the password minimum to four characters
+  without composition rules.
+- Added canonical searches, collection persistence, price APIs, Web routes, and redacted Ctrip
+  fixtures.
+- Verified the initial GitHub code-check workflows; Docker image publication remains disabled.
+
+### 2026-07-21
+
+- Completed collection dispatch, scheduler recovery, Chrome runtime, response settle/richness,
+  in-process rate gates, lease fencing, partial-data persistence, and bounded retry integration.
+- Ran a real `SHA-TYO` round-trip job end to end: three attempts, 3,390 calendar observations,
+  1,130 latest snapshots, no fake detailed offers, no raw artifacts, and a terminal warning state.
+- Verified a new user can subscribe to the same canonical query and immediately page through shared
+  round-trip calendar data without losing owner isolation.
+- Added latest/history/calendar/matrix queries, dashboard aggregates, exact filtered search counts,
+  cursor pagination, alert evaluation, non-email delivery adapters, and Web management flows.
+- Separated maximum result filtering from notification target prices and migrated legacy-coupled
+  rows safely.
+- Measured representative PostgreSQL queries on the 480,000-observation reference profile and
+  recorded residual 100-route linear dashboard cost.
+- Added readiness, request IDs, explicit collection data-quality fields, and vendor bundle chunks.
+- Passed full ordinary and PostgreSQL-backed test suites, Ruff, Alembic head/check, frontend lint
+  and build, local/production Compose parsing, and live API workflow checks without building Docker
+  images.

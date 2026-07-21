@@ -1,0 +1,394 @@
+name: farescope-production
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-server-build: &server-build
+  context: ./server
+  dockerfile: Dockerfile
+  target: runtime
+
+x-server-environment: &server-environment
+  FARESCOPE_ENVIRONMENT: production
+  FARESCOPE_SESSION_COOKIE_SECURE: "true"
+  FARESCOPE_CORS_ORIGINS: '["${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN, e.g. https://farescope.example.com}"]'
+  FARESCOPE_SECRET_ENCRYPTION_KEY: ${FARESCOPE_SECRET_ENCRYPTION_KEY:?set FARESCOPE_SECRET_ENCRYPTION_KEY}
+  FARESCOPE_DATABASE_URL: ${FARESCOPE_DATABASE_URL:?set FARESCOPE_DATABASE_URL with the pgbouncer host}
+  FARESCOPE_REDIS_URL: ${FARESCOPE_REDIS_URL:?set FARESCOPE_REDIS_URL}
+  FARESCOPE_COLLECTOR_BROWSER_CHANNEL: ${FARESCOPE_COLLECTOR_BROWSER_CHANNEL:-chrome}
+  FARESCOPE_COLLECTION_DISPATCH_LEASE_SECONDS: ${FARESCOPE_COLLECTION_DISPATCH_LEASE_SECONDS:-120}
+  FARESCOPE_COLLECTION_RUN_LEASE_SECONDS: ${FARESCOPE_COLLECTION_RUN_LEASE_SECONDS:-900}
+  FARESCOPE_COLLECTION_RETRY_BASE_SECONDS: ${FARESCOPE_COLLECTION_RETRY_BASE_SECONDS:-60}
+  FARESCOPE_COLLECTION_RETRY_MAX_SECONDS: ${FARESCOPE_COLLECTION_RETRY_MAX_SECONDS:-1800}
+  FARESCOPE_COLLECTION_RETRY_JITTER_RATIO: ${FARESCOPE_COLLECTION_RETRY_JITTER_RATIO:-0.2}
+  FARESCOPE_COLLECTION_PROVIDER_CONCURRENCY: ${FARESCOPE_COLLECTION_PROVIDER_CONCURRENCY:-2}
+  FARESCOPE_COLLECTION_ROUTE_CONCURRENCY: ${FARESCOPE_COLLECTION_ROUTE_CONCURRENCY:-1}
+  FARESCOPE_COLLECTION_MINIMUM_INTERVAL_SECONDS: ${FARESCOPE_COLLECTION_MINIMUM_INTERVAL_SECONDS:-3}
+  FARESCOPE_COLLECTION_JITTER_SECONDS: ${FARESCOPE_COLLECTION_JITTER_SECONDS:-1}
+  FARESCOPE_COLLECTION_CAPTURE_SETTLE_SECONDS: ${FARESCOPE_COLLECTION_CAPTURE_SETTLE_SECONDS:-2}
+  FARESCOPE_COLLECTION_SCHEDULER_TICK_SECONDS: ${FARESCOPE_COLLECTION_SCHEDULER_TICK_SECONDS:-30}
+  FARESCOPE_COLLECTION_SCHEDULER_SUBSCRIPTION_BATCH_SIZE: ${FARESCOPE_COLLECTION_SCHEDULER_SUBSCRIPTION_BATCH_SIZE:-500}
+  FARESCOPE_COLLECTION_SCHEDULER_DISPATCH_BATCH_SIZE: ${FARESCOPE_COLLECTION_SCHEDULER_DISPATCH_BATCH_SIZE:-100}
+  FARESCOPE_COLLECTION_SCHEDULE_BUCKET_SECONDS: ${FARESCOPE_COLLECTION_SCHEDULE_BUCKET_SECONDS:-300}
+  FARESCOPE_COLLECTION_PARTITION_MAINTENANCE_SECONDS: ${FARESCOPE_COLLECTION_PARTITION_MAINTENANCE_SECONDS:-3600}
+
+x-server-security: &server-security
+  init: true
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=1770
+  logging: *default-logging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-farescope}
+      POSTGRES_USER: ${POSTGRES_USER:-farescope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-1536MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
+      - -c
+      - effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-200}
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_lock_waits=on
+      - -c
+      - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_MS:-500}
+      - -c
+      - statement_timeout=${POSTGRES_STATEMENT_TIMEOUT:-30s}
+      - -c
+      - lock_timeout=${POSTGRES_LOCK_TIMEOUT:-10s}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_TRANSACTION_TIMEOUT:-60s}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks:
+      - backend
+    logging: *default-logging
+
+  pgbouncer:
+    image: ${FARESCOPE_PGBOUNCER_IMAGE:-farescope-pgbouncer:local}
+    build:
+      context: ./deploy/pgbouncer
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-farescope}
+      POSTGRES_USER: ${POSTGRES_USER:-farescope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGBOUNCER_MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-400}
+      PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-40}
+      PGBOUNCER_MIN_POOL_SIZE: ${PGBOUNCER_MIN_POOL_SIZE:-5}
+      PGBOUNCER_RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-10}
+      PGBOUNCER_MAX_DB_CONNECTIONS: ${PGBOUNCER_MAX_DB_CONNECTIONS:-60}
+      PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-200}
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=1770
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - backend
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - backend
+    logging: *default-logging
+
+  migrate:
+    image: ${FARESCOPE_SERVER_IMAGE:-farescope-server:local}
+    build: *server-build
+    restart: "no"
+    <<: *server-security
+    environment:
+      <<: *server-environment
+      FARESCOPE_DATABASE_URL: ${FARESCOPE_MIGRATION_DATABASE_URL:?set FARESCOPE_MIGRATION_DATABASE_URL for direct postgres migrations}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  api:
+    image: ${FARESCOPE_SERVER_IMAGE:-farescope-server:local}
+    build: *server-build
+    restart: unless-stopped
+    <<: *server-security
+    environment:
+      <<: *server-environment
+      FARESCOPE_BOOTSTRAP_ADMIN_TOKEN: ${FARESCOPE_BOOTSTRAP_ADMIN_TOKEN:?set FARESCOPE_BOOTSTRAP_ADMIN_TOKEN}
+    command:
+      - uvicorn
+      - app.main:app
+      - --host=0.0.0.0
+      - --port=8000
+      - --workers=${FARESCOPE_API_WORKERS:-2}
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=2)\""]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 15s
+    networks:
+      - edge
+      - backend
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  worker:
+    image: ${FARESCOPE_SERVER_IMAGE:-farescope-server:local}
+    build: *server-build
+    restart: unless-stopped
+    <<: *server-security
+    environment:
+      <<: *server-environment
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --hostname=worker@%h
+      - --queues=default,analysis,notifications
+      - --concurrency=${FARESCOPE_WORKER_CONCURRENCY:-4}
+      - --max-tasks-per-child=1000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app:celery_app inspect ping --destination=worker@$${HOSTNAME} --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - egress
+      - backend
+    stop_grace_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  scheduler:
+    image: ${FARESCOPE_SERVER_IMAGE:-farescope-server:local}
+    build: *server-build
+    restart: unless-stopped
+    <<: *server-security
+    environment:
+      <<: *server-environment
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --pidfile=/var/lib/farescope/celerybeat/celerybeat.pid
+      - --schedule=/var/lib/farescope/celerybeat/celerybeat-schedule
+    volumes:
+      - celerybeat-data:/var/lib/farescope/celerybeat
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /var/lib/farescope/celerybeat/celerybeat.pid && kill -0 $$(cat /var/lib/farescope/celerybeat/celerybeat.pid)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - backend
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  collector:
+    image: ${FARESCOPE_COLLECTOR_IMAGE:-farescope-collector:local}
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      target: ${FARESCOPE_COLLECTOR_IMAGE_TARGET:-collector-runtime}
+    restart: unless-stopped
+    <<: *server-security
+    environment:
+      <<: *server-environment
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      HOME: /tmp/farescope-home
+      FARESCOPE_COLLECTOR_ARTIFACT_DIR: /var/lib/farescope/collector-artifacts
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --hostname=collector@%h
+      - --queues=collector
+      - --concurrency=1
+      - --max-tasks-per-child=25
+      - --max-memory-per-child=1200000
+    volumes:
+      - collector-artifacts:/var/lib/farescope/collector-artifacts
+    shm_size: 1gb
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/scripts/collector/runtime_smoke.py doctor --browser-channel \"$${FARESCOPE_COLLECTOR_BROWSER_CHANNEL}\" --skip-display-check >/dev/null && test -f /tmp/farescope-home/browser-ready && celery -A app.tasks.celery_app:celery_app inspect ping --destination=collector@$${HOSTNAME} --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    networks:
+      - egress
+      - backend
+    stop_grace_period: 90s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  web:
+    image: ${FARESCOPE_WEB_IMAGE:-farescope-web:local}
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    user: "101:101"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:rw,nosuid,nodev,size=32m,uid=101,gid=101,mode=0750
+      - /var/run:rw,nosuid,nodev,size=4m,uid=101,gid=101,mode=0750
+      - /tmp:rw,nosuid,nodev,size=8m,uid=101,gid=101,mode=1770
+    ports:
+      - "127.0.0.1:${FARESCOPE_HTTP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - edge
+    logging: *default-logging
+
+volumes:
+  postgres-data:
+    name: farescope-production-postgres
+  redis-data:
+    name: farescope-production-redis
+  celerybeat-data:
+    name: farescope-production-celerybeat
+  collector-artifacts:
+    name: farescope-production-collector-artifacts
+
+networks:
+  edge:
+    name: farescope-production-edge
+  backend:
+    name: farescope-production-backend
+    internal: true
+  egress:
+    name: farescope-production-egress

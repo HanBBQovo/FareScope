@@ -15,6 +15,24 @@ export default defineConfig({
     rollupOptions: {
       output: {
         chunkFileNames: 'assets/chunk-[hash].js',
+        manualChunks(id) {
+          if (id.includes('/node_modules/recharts/') || id.includes('/node_modules/d3-')) {
+            return 'charts-vendor'
+          }
+          if (id.includes('/node_modules/@radix-ui/')) return 'radix-vendor'
+          if (id.includes('/node_modules/lucide-react/')) return 'icons-vendor'
+          if (id.includes('/node_modules/@tanstack/react-query/')) return 'query-vendor'
+          if (
+            id.includes('/node_modules/react/')
+            || id.includes('/node_modules/react-dom/')
+            || id.includes('/node_modules/react-router/')
+            || id.includes('/node_modules/react-router-dom/')
+            || id.includes('/node_modules/scheduler/')
+          ) {
+            return 'react-vendor'
+          }
+          return undefined
+        },
       },
     },
   },

@@ -1,0 +1,66 @@
+{
+  "status": 0,
+  "data": {
+    "context": {
+      "currency": "CNY"
+    },
+    "flightItineraryList": [
+      {
+        "itineraryId": "redacted-round-trip-itinerary",
+        "duration": 410,
+        "flightSegments": [
+          {
+            "duration": 190,
+            "flightList": [
+              {
+                "flightNo": "ZZ301",
+                "airlineCode": "ZZ",
+                "airlineName": "Redacted Air",
+                "departureAirportCode": "NKG",
+                "departureAirportName": "Redacted Origin Airport",
+                "departureDateTime": "2026-08-15T08:20:00+08:00",
+                "departureTimeZone": "Asia/Shanghai",
+                "arrivalAirportCode": "PKX",
+                "arrivalAirportName": "Redacted Destination Airport",
+                "arrivalDateTime": "2026-08-15T11:30:00+08:00",
+                "arrivalTimeZone": "Asia/Shanghai",
+                "duration": 190,
+                "stopList": []
+              }
+            ]
+          },
+          {
+            "duration": 220,
+            "flightList": [
+              {
+                "flightNo": "ZZ302",
+                "airlineCode": "ZZ",
+                "airlineName": "Redacted Air",
+                "departureAirportCode": "PKX",
+                "departureAirportName": "Redacted Destination Airport",
+                "departureDateTime": "2026-08-22T14:10:00+08:00",
+                "departureTimeZone": "Asia/Shanghai",
+                "arrivalAirportCode": "NKG",
+                "arrivalAirportName": "Redacted Origin Airport",
+                "arrivalDateTime": "2026-08-22T17:50:00+08:00",
+                "arrivalTimeZone": "Asia/Shanghai",
+                "duration": 220,
+                "stopList": []
+              }
+            ]
+          }
+        ],
+        "priceList": [
+          {
+            "priceId": "redacted-round-trip-offer",
+            "currency": "CNY",
+            "adultPrice": 1520,
+            "adultTax": 180,
+            "totalPrice": 1700,
+            "seatCount": 5
+          }
+        ]
+      }
+    ]
+  }
+}

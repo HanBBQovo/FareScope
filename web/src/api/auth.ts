@@ -1,31 +1,73 @@
-import { apiRequest, clearAuthToken, getAuthToken, setAuthToken } from '@/api/client'
+import { ApiError, apiRequest } from '@/api/client'
 
-/**
- * 鉴权相关接口。token 的存取与请求头注入都在 api/client 里,
- * 这里只负责登录 / 登出 / 状态查询三个动作。
- *
- * 模板假设后端是「单密码 + Bearer token」的最简方案,换成账号密码 /
- * OAuth 时只改这个文件,api/client 与页面层不用动。
- */
+/** 鉴权接口使用服务端 HttpOnly Cookie；前端不保存或伪造会话。 */
 
-export async function login(password: string): Promise<void> {
-  const result = await apiRequest<{ token: string }>('/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ password }),
-  })
-  setAuthToken(result.token)
+export interface SessionUser {
+  id: string
+  username: string
+  email: string | null
+  displayName: string
 }
 
-export async function logout(): Promise<void> {
-  try {
-    await apiRequest('/auth/logout', { method: 'POST', body: '{}' })
-  } finally {
-    clearAuthToken()
+export interface AuthSession {
+  authenticated: boolean
+  user: SessionUser | null
+  mode: 'live'
+}
+
+export const sessionQueryKey = ['auth', 'session'] as const
+
+interface BackendUser {
+  id: string
+  username: string
+  email: string | null
+  display_name: string
+}
+
+interface BackendAuthenticatedUser {
+  user: BackendUser
+}
+
+function liveSession(payload: BackendAuthenticatedUser): AuthSession {
+  return {
+    authenticated: true,
+    mode: 'live',
+    user: {
+      id: payload.user.id,
+      username: payload.user.username,
+      email: payload.user.email,
+      displayName: payload.user.display_name,
+    },
   }
 }
 
-export async function getAuthStatus(): Promise<boolean> {
-  if (!getAuthToken()) return false
-  const result = await apiRequest<{ authenticated: boolean }>('/auth/status')
-  return Boolean(result.authenticated)
+export async function login(username: string, password: string): Promise<AuthSession> {
+  const payload = await apiRequest<BackendAuthenticatedUser>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  })
+  return liveSession(payload)
+}
+
+export async function register(username: string, password: string): Promise<AuthSession> {
+  const payload = await apiRequest<BackendAuthenticatedUser>('/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  })
+  return liveSession(payload)
+}
+
+export async function logout(): Promise<void> {
+  await apiRequest('/auth/logout', { method: 'POST', body: '{}' })
+}
+
+export async function getSession(): Promise<AuthSession> {
+  try {
+    return liveSession(await apiRequest<BackendAuthenticatedUser>('/auth/me'))
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      return { authenticated: false, user: null, mode: 'live' }
+    }
+    throw error
+  }
 }

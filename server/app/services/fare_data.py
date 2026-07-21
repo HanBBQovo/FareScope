@@ -1,0 +1,819 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from typing import Literal
+from uuid import UUID
+
+from sqlalchemy import exists, extract, func, literal, select, tuple_, union_all
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import CTE
+
+from app.api.pagination import BucketCursor, DatePairCursor, TimestampCursor
+from app.domain.search import SearchFilters
+from app.models import (
+    CollectionRun,
+    FareOffer,
+    Itinerary,
+    LatestCalendarPriceSnapshot,
+    PriceObservation,
+    SearchLeg,
+    SearchQuery,
+    Segment,
+    Subscription,
+    SubscriptionFilter,
+)
+from app.models.enums import CollectionStatus
+
+HistoryResolution = Literal["raw", "hour", "day"]
+
+
+@dataclass(frozen=True, slots=True)
+class FareFilterSpec:
+    direct_only: bool = False
+    airline_codes: tuple[str, ...] = ()
+    departure_airports: tuple[str, ...] = ()
+    arrival_airports: tuple[str, ...] = ()
+    max_price_minor: int | None = None
+    max_stops: int | None = None
+    max_duration_minutes: int | None = None
+    departure_minute_start: int | None = None
+    departure_minute_end: int | None = None
+
+    @classmethod
+    def from_search_filters(cls, filters: SearchFilters) -> FareFilterSpec:
+        return cls(**filters.model_dump())
+
+    @classmethod
+    def from_subscription(
+        cls,
+        search_query: SearchQuery,
+        filters: SubscriptionFilter,
+    ) -> FareFilterSpec:
+        return cls(
+            direct_only=search_query.direct_only,
+            airline_codes=tuple(filters.airline_codes),
+            departure_airports=tuple(filters.origin_airport_codes),
+            arrival_airports=tuple(filters.destination_airport_codes),
+            max_price_minor=filters.max_price_minor,
+            max_stops=filters.max_stops,
+            max_duration_minutes=filters.max_duration_minutes,
+            departure_minute_start=filters.departure_time_start_minutes,
+            departure_minute_end=filters.departure_time_end_minutes,
+        )
+
+    @property
+    def requires_itinerary_scan(self) -> bool:
+        return bool(
+            self.airline_codes
+            or self.departure_airports
+            or self.arrival_airports
+            or self.max_stops is not None
+            or self.max_duration_minutes is not None
+            or self.departure_minute_start is not None
+            or self.departure_minute_end is not None
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionFareContext:
+    subscription: Subscription
+    search_query: SearchQuery
+    filters: SubscriptionFilter
+    legs: tuple[SearchLeg, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarPriceItem:
+    departure_date: date
+    return_date: date | None
+    currency: str
+    lowest_price_minor: int
+    total_price_minor: int | None
+    observed_at: datetime
+    direct_verified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarPricePage:
+    items: tuple[CalendarPriceItem, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryPoint:
+    observed_at: datetime
+    price_minor: int
+    lowest_price_minor: int
+    highest_price_minor: int
+    average_price_minor: float
+    sample_count: int
+    row_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PriceHistoryPage:
+    items: tuple[HistoryPoint, ...]
+    has_more: bool
+    minimum_price_minor: int | None
+    maximum_price_minor: int | None
+    average_price_minor: float | None
+    sample_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionHealthStats:
+    last_success_at: datetime | None
+    success_rate_24h: float | None
+    next_scheduled_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionLatestFare:
+    subscription_id: UUID
+    collection_run_id: UUID
+    total_price_minor: int
+    currency: str
+    observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardSubscriptionStats:
+    active_subscriptions: int
+    routes_tracked: int
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardPriceAnalytics:
+    trend: tuple[HistoryPoint, ...]
+    price_change_percent: float | None
+
+
+async def load_subscription_fare_context(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    subscription_id: UUID,
+) -> SubscriptionFareContext | None:
+    row = (
+        await session.execute(
+            select(Subscription, SearchQuery, SubscriptionFilter)
+            .join(SearchQuery, SearchQuery.id == Subscription.search_query_id)
+            .join(
+                SubscriptionFilter,
+                SubscriptionFilter.subscription_id == Subscription.id,
+            )
+            .where(
+                Subscription.id == subscription_id,
+                Subscription.user_id == user_id,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    subscription, search_query, filters = row
+    legs = tuple(
+        (
+            await session.scalars(
+                select(SearchLeg)
+                .where(SearchLeg.search_query_id == search_query.id)
+                .order_by(SearchLeg.position)
+            )
+        ).all()
+    )
+    return SubscriptionFareContext(
+        subscription=subscription,
+        search_query=search_query,
+        filters=filters,
+        legs=legs,
+    )
+
+
+async def load_collection_health(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    now: datetime,
+) -> CollectionHealthStats:
+    """Calculate health over all of the owner's routes, not just the visible run page."""
+
+    query_ids = select(Subscription.search_query_id).where(
+        Subscription.user_id == user_id,
+        Subscription.enabled.is_(True),
+    )
+    day_ago = now - timedelta(hours=24)
+    last_success_at = await session.scalar(
+        select(CollectionRun.finished_at)
+        .where(
+            CollectionRun.search_query_id.in_(query_ids),
+            CollectionRun.status == CollectionStatus.SUCCEEDED.value,
+            CollectionRun.finished_at.is_not(None),
+            CollectionRun.finished_at <= now,
+        )
+        .order_by(CollectionRun.finished_at.desc(), CollectionRun.id.desc())
+        .limit(1)
+    )
+    successful_24h, terminal_24h = (
+        await session.execute(
+            select(
+                func.count()
+                .filter(
+                    CollectionRun.status == CollectionStatus.SUCCEEDED.value,
+                )
+                .label("successful_24h"),
+                func.count().label("terminal_24h"),
+            ).where(
+                CollectionRun.search_query_id.in_(query_ids),
+                CollectionRun.status.in_(
+                    (
+                        CollectionStatus.SUCCEEDED.value,
+                        CollectionStatus.FAILED.value,
+                        CollectionStatus.CANCELED.value,
+                    )
+                ),
+                CollectionRun.finished_at >= day_ago,
+                CollectionRun.finished_at <= now,
+            )
+        )
+    ).one()
+    next_due_at = await session.scalar(
+        select(func.min(Subscription.next_due_at)).where(
+            Subscription.user_id == user_id,
+            Subscription.enabled.is_(True),
+            Subscription.next_due_at.is_not(None),
+        )
+    )
+    success_rate = (
+        successful_24h / terminal_24h * 100 if terminal_24h else None
+    )
+    return CollectionHealthStats(
+        last_success_at=last_success_at,
+        success_rate_24h=success_rate,
+        next_scheduled_at=next_due_at,
+    )
+
+
+async def load_dashboard_subscription_stats(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+) -> DashboardSubscriptionStats:
+    active_subscriptions, routes_tracked = (
+        await session.execute(
+            select(
+                func.count().filter(Subscription.enabled.is_(True)),
+                func.count(func.distinct(Subscription.search_query_id)),
+            ).where(Subscription.user_id == user_id)
+        )
+    ).one()
+    return DashboardSubscriptionStats(
+        active_subscriptions=int(active_subscriptions or 0),
+        routes_tracked=int(routes_tracked or 0),
+    )
+
+
+async def load_dashboard_price_analytics(
+    session: AsyncSession,
+    *,
+    contexts: tuple[SubscriptionFareContext, ...],
+    as_of: datetime,
+    days: int = 30,
+    currency: str = "CNY",
+) -> DashboardPriceAnalytics:
+    """Aggregate a bounded trend for the active, visible dashboard routes.
+
+    Identical canonical-query/filter pairs are deduplicated. Different local filters remain
+    separate because they represent distinct prices visible to the owner.
+    """
+
+    if not 2 <= days <= 90:
+        raise ValueError("dashboard trend days must be between 2 and 90")
+    if as_of.tzinfo is None:
+        raise ValueError("dashboard trend snapshot must include a timezone")
+
+    since = as_of - timedelta(days=days)
+    grouped_contexts: dict[tuple[UUID, FareFilterSpec], SubscriptionFareContext] = {}
+    for context in contexts:
+        if not context.subscription.enabled or context.search_query.currency != currency:
+            continue
+        key = (
+            context.search_query.id,
+            FareFilterSpec.from_subscription(context.search_query, context.filters),
+        )
+        grouped_contexts.setdefault(key, context)
+
+    branches = []
+    for branch_number, context in enumerate(grouped_contexts.values()):
+        run_minima = _history_run_minima(
+            search_query=context.search_query,
+            filters=FareFilterSpec.from_subscription(
+                context.search_query,
+                context.filters,
+            ),
+            since=since,
+            as_of=as_of,
+            cte_name=f"dashboard_run_minima_{branch_number}",
+        )
+        branches.append(
+            select(
+                run_minima.c.observed_at.label("observed_at"),
+                run_minima.c.price_minor.label("price_minor"),
+            )
+        )
+
+    if not branches:
+        return DashboardPriceAnalytics(trend=(), price_change_percent=None)
+
+    observation_statement = branches[0] if len(branches) == 1 else union_all(*branches)
+    observations = observation_statement.cte("dashboard_price_observations")
+    bucket = func.date_trunc(
+        "day",
+        func.timezone("UTC", observations.c.observed_at),
+    ).label("bucket")
+    current_start = as_of - timedelta(hours=24)
+    previous_start = as_of - timedelta(hours=48)
+    current_price = (
+        select(func.min(observations.c.price_minor))
+        .where(observations.c.observed_at >= current_start)
+        .scalar_subquery()
+    )
+    previous_price = (
+        select(func.min(observations.c.price_minor))
+        .where(
+            observations.c.observed_at >= previous_start,
+            observations.c.observed_at < current_start,
+        )
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                bucket,
+                func.min(observations.c.price_minor).label("lowest_price_minor"),
+                func.max(observations.c.price_minor).label("highest_price_minor"),
+                func.avg(observations.c.price_minor).label("average_price_minor"),
+                func.count().label("sample_count"),
+                current_price.label("current_price_minor"),
+                previous_price.label("previous_price_minor"),
+            )
+            .group_by(bucket)
+            .order_by(bucket)
+            .limit(days + 1)
+        )
+    ).all()
+    if not rows:
+        return DashboardPriceAnalytics(trend=(), price_change_percent=None)
+
+    trend = tuple(
+        HistoryPoint(
+            observed_at=_as_utc(row.bucket),
+            price_minor=row.lowest_price_minor,
+            lowest_price_minor=row.lowest_price_minor,
+            highest_price_minor=row.highest_price_minor,
+            average_price_minor=float(row.average_price_minor),
+            sample_count=row.sample_count,
+        )
+        for row in rows
+    )
+    current = rows[0].current_price_minor
+    previous = rows[0].previous_price_minor
+    price_change_percent = (
+        (current - previous) / previous * 100
+        if current is not None and previous not in (None, 0)
+        else None
+    )
+    return DashboardPriceAnalytics(
+        trend=trend,
+        price_change_percent=price_change_percent,
+    )
+
+
+async def load_subscription_latest_fares(
+    session: AsyncSession,
+    *,
+    contexts: tuple[SubscriptionFareContext, ...],
+) -> dict[UUID, SubscriptionLatestFare]:
+    if not contexts:
+        return {}
+
+    query_ids = {context.search_query.id for context in contexts}
+    latest_runs = (
+        await session.scalars(
+            select(CollectionRun)
+            .where(
+                CollectionRun.search_query_id.in_(query_ids),
+                CollectionRun.status == CollectionStatus.SUCCEEDED.value,
+                CollectionRun.finished_at.is_not(None),
+            )
+            .distinct(CollectionRun.search_query_id)
+            .order_by(
+                CollectionRun.search_query_id,
+                CollectionRun.finished_at.desc(),
+                CollectionRun.id.desc(),
+            )
+        )
+    ).all()
+    run_by_query = {run.search_query_id: run for run in latest_runs}
+
+    grouped: dict[
+        tuple[UUID, UUID, str, FareFilterSpec],
+        list[UUID],
+    ] = {}
+    for context in contexts:
+        run = run_by_query.get(context.search_query.id)
+        if run is None:
+            continue
+        key = (
+            run.id,
+            context.search_query.id,
+            context.search_query.currency,
+            FareFilterSpec.from_subscription(context.search_query, context.filters),
+        )
+        grouped.setdefault(key, []).append(context.subscription.id)
+
+    branches = []
+    branch_keys: list[tuple[UUID, UUID, str, FareFilterSpec]] = []
+    for branch_number, key in enumerate(grouped):
+        run_id, query_id, currency, filters = key
+        conditions = list(itinerary_filter_conditions(filters))
+        if filters.max_price_minor is not None:
+            conditions.append(FareOffer.total_price_minor <= filters.max_price_minor)
+        limited = (
+            select(
+                FareOffer.total_price_minor.label("total_price_minor"),
+                FareOffer.currency.label("currency"),
+            )
+            .join(Itinerary, Itinerary.id == FareOffer.itinerary_id)
+            .where(
+                FareOffer.collection_run_id == run_id,
+                FareOffer.currency == currency,
+                Itinerary.search_query_id == query_id,
+                *conditions,
+            )
+            .order_by(FareOffer.total_price_minor, FareOffer.id)
+            .limit(1)
+            .subquery()
+        )
+        branches.append(
+            select(
+                literal(branch_number).label("branch_number"),
+                limited.c.total_price_minor,
+                limited.c.currency,
+            )
+        )
+        branch_keys.append(key)
+
+    if not branches:
+        return {}
+    statement = branches[0] if len(branches) == 1 else union_all(*branches)
+    rows = (await session.execute(statement)).all()
+    result: dict[UUID, SubscriptionLatestFare] = {}
+    for row in rows:
+        key = branch_keys[row.branch_number]
+        run = run_by_query[key[1]]
+        if run.finished_at is None:
+            continue
+        for subscription_id in grouped[key]:
+            result[subscription_id] = SubscriptionLatestFare(
+                subscription_id=subscription_id,
+                collection_run_id=run.id,
+                total_price_minor=row.total_price_minor,
+                currency=row.currency,
+                observed_at=run.finished_at,
+            )
+    return result
+
+
+async def list_latest_calendar_prices(
+    session: AsyncSession,
+    *,
+    search_query_id: UUID,
+    currency: str,
+    round_trip: bool,
+    departure_start: date,
+    departure_end: date,
+    return_start: date | None,
+    return_end: date | None,
+    after: DatePairCursor | None,
+    limit: int,
+) -> CalendarPricePage:
+    if not 1 <= limit <= 500:
+        raise ValueError("calendar page limit must be between 1 and 500")
+
+    return_sort = (
+        LatestCalendarPriceSnapshot.return_date
+        if round_trip
+        else func.coalesce(LatestCalendarPriceSnapshot.return_date, date.min)
+    )
+    statement = (
+        select(LatestCalendarPriceSnapshot)
+        .where(
+            LatestCalendarPriceSnapshot.search_query_id == search_query_id,
+            LatestCalendarPriceSnapshot.currency == currency,
+            LatestCalendarPriceSnapshot.departure_date >= departure_start,
+            LatestCalendarPriceSnapshot.departure_date <= departure_end,
+        )
+        .order_by(
+            LatestCalendarPriceSnapshot.departure_date,
+            return_sort,
+        )
+        .limit(limit + 1)
+    )
+    statement = statement.where(
+        LatestCalendarPriceSnapshot.return_date.is_not(None)
+        if round_trip
+        else LatestCalendarPriceSnapshot.return_date.is_(None)
+    )
+    if return_start is not None:
+        statement = statement.where(
+            LatestCalendarPriceSnapshot.return_date.is_not(None),
+            LatestCalendarPriceSnapshot.return_date >= return_start,
+        )
+    if return_end is not None:
+        statement = statement.where(
+            LatestCalendarPriceSnapshot.return_date.is_not(None),
+            LatestCalendarPriceSnapshot.return_date <= return_end,
+        )
+    if after is not None:
+        statement = statement.where(
+            tuple_(LatestCalendarPriceSnapshot.departure_date, return_sort)
+            > tuple_(after.departure_date, after.return_date or date.min)
+        )
+
+    rows = (await session.scalars(statement)).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return CalendarPricePage(
+        items=tuple(
+            CalendarPriceItem(
+                departure_date=row.departure_date,
+                return_date=row.return_date,
+                currency=row.currency,
+                lowest_price_minor=row.lowest_price_minor,
+                total_price_minor=row.total_price_minor,
+                observed_at=row.observed_at,
+                direct_verified=row.direct_verified,
+            )
+            for row in rows
+        ),
+        has_more=has_more,
+    )
+
+
+async def load_price_history(
+    session: AsyncSession,
+    *,
+    context: SubscriptionFareContext,
+    since: datetime,
+    as_of: datetime,
+    resolution: HistoryResolution,
+    limit: int,
+    after: TimestampCursor | BucketCursor | None = None,
+) -> PriceHistoryPage:
+    if not 1 <= limit <= 500:
+        raise ValueError("history page limit must be between 1 and 500")
+    if resolution == "raw" and after is not None and not isinstance(after, TimestampCursor):
+        raise ValueError("raw history requires a timestamp cursor")
+    if resolution != "raw" and after is not None and not isinstance(after, BucketCursor):
+        raise ValueError("aggregated history requires a bucket cursor")
+
+    filters = FareFilterSpec.from_subscription(context.search_query, context.filters)
+    run_minima = _history_run_minima(
+        search_query=context.search_query,
+        filters=filters,
+        since=since,
+        as_of=as_of,
+    )
+    stats_row = (
+        await session.execute(
+            select(
+                func.min(run_minima.c.price_minor),
+                func.max(run_minima.c.price_minor),
+                func.avg(run_minima.c.price_minor),
+                func.count(),
+            ).select_from(run_minima)
+        )
+    ).one()
+    minimum, maximum, average, sample_count = stats_row
+
+    if resolution == "raw":
+        statement = select(
+            run_minima.c.run_id,
+            run_minima.c.observed_at,
+            run_minima.c.price_minor,
+        )
+        if after is not None:
+            statement = statement.where(
+                tuple_(run_minima.c.observed_at, run_minima.c.run_id)
+                > tuple_(after.timestamp, after.row_id)
+            )
+        rows = (
+            await session.execute(
+                statement.order_by(run_minima.c.observed_at, run_minima.c.run_id).limit(
+                    limit + 1
+                )
+            )
+        ).all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = tuple(
+            HistoryPoint(
+                observed_at=row.observed_at,
+                price_minor=row.price_minor,
+                lowest_price_minor=row.price_minor,
+                highest_price_minor=row.price_minor,
+                average_price_minor=float(row.price_minor),
+                sample_count=1,
+                row_id=row.run_id,
+            )
+            for row in rows
+        )
+    else:
+        bucket = func.date_trunc(
+            resolution,
+            func.timezone("UTC", run_minima.c.observed_at),
+        ).label("bucket")
+        aggregate = (
+            select(
+                bucket,
+                func.min(run_minima.c.price_minor).label("lowest_price_minor"),
+                func.max(run_minima.c.price_minor).label("highest_price_minor"),
+                func.avg(run_minima.c.price_minor).label("average_price_minor"),
+                func.count().label("sample_count"),
+            )
+            .group_by(bucket)
+            .subquery("history_buckets")
+        )
+        statement = select(aggregate)
+        if isinstance(after, BucketCursor):
+            statement = statement.where(aggregate.c.bucket > after.bucket)
+        rows = (
+            await session.execute(
+                statement.order_by(aggregate.c.bucket).limit(limit + 1)
+            )
+        ).all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = tuple(
+            HistoryPoint(
+                observed_at=_as_utc(row.bucket),
+                price_minor=row.lowest_price_minor,
+                lowest_price_minor=row.lowest_price_minor,
+                highest_price_minor=row.highest_price_minor,
+                average_price_minor=float(row.average_price_minor),
+                sample_count=row.sample_count,
+            )
+            for row in rows
+        )
+
+    return PriceHistoryPage(
+        items=items,
+        has_more=has_more,
+        minimum_price_minor=minimum,
+        maximum_price_minor=maximum,
+        average_price_minor=float(average) if average is not None else None,
+        sample_count=int(sample_count or 0),
+    )
+
+
+def itinerary_filter_conditions(filters: FareFilterSpec) -> tuple[ColumnElement[bool], ...]:
+    conditions: list[ColumnElement[bool]] = []
+    if filters.direct_only:
+        conditions.append(Itinerary.is_direct.is_(True))
+    if filters.max_stops is not None:
+        conditions.append(Itinerary.stop_count <= filters.max_stops)
+    if filters.max_duration_minutes is not None:
+        conditions.append(Itinerary.total_duration_minutes <= filters.max_duration_minutes)
+
+    if filters.airline_codes:
+        airline_segment = aliased(Segment)
+        conditions.append(
+            exists(
+                select(1).where(
+                    airline_segment.itinerary_id == Itinerary.id,
+                    airline_segment.marketing_airline_code.in_(filters.airline_codes),
+                )
+            )
+        )
+
+    if filters.departure_airports or filters.departure_minute_start is not None:
+        first_segment = aliased(Segment)
+        first_conditions: list[ColumnElement[bool]] = [
+            first_segment.itinerary_id == Itinerary.id,
+            first_segment.leg_position == 0,
+            first_segment.position == 0,
+        ]
+        if filters.departure_airports:
+            first_conditions.append(
+                first_segment.origin_airport_code.in_(filters.departure_airports)
+            )
+        if (
+            filters.departure_minute_start is not None
+            and filters.departure_minute_end is not None
+        ):
+            departure_minute = (
+                extract("hour", first_segment.departure_local) * 60
+                + extract("minute", first_segment.departure_local)
+            )
+            first_conditions.extend(
+                (
+                    departure_minute >= filters.departure_minute_start,
+                    departure_minute < filters.departure_minute_end,
+                )
+            )
+        conditions.append(exists(select(1).where(*first_conditions)))
+
+    if filters.arrival_airports:
+        arrival_segment = aliased(Segment)
+        later_segment = aliased(Segment)
+        has_later_segment = exists(
+            select(1).where(
+                later_segment.itinerary_id == arrival_segment.itinerary_id,
+                later_segment.leg_position == 0,
+                later_segment.position > arrival_segment.position,
+            )
+        ).correlate(arrival_segment)
+        conditions.append(
+            exists(
+                select(1).where(
+                    arrival_segment.itinerary_id == Itinerary.id,
+                    arrival_segment.leg_position == 0,
+                    arrival_segment.destination_airport_code.in_(filters.arrival_airports),
+                    ~has_later_segment,
+                )
+            )
+        )
+    return tuple(conditions)
+
+
+def resolve_history_resolution(
+    requested: Literal["auto", "raw", "hour", "day"],
+    *,
+    days: int,
+) -> HistoryResolution:
+    if requested == "auto":
+        return "hour" if days <= 14 else "day"
+    return requested
+
+
+def validate_calendar_window(start: date, end: date, *, maximum_days: int = 366) -> None:
+    if end < start:
+        raise ValueError("calendar range end cannot precede its start")
+    if end - start > timedelta(days=maximum_days):
+        raise ValueError(f"calendar range cannot exceed {maximum_days} days")
+
+
+def validate_calendar_cursor_mode(cursor: DatePairCursor, *, round_trip: bool) -> None:
+    if round_trip and cursor.return_date is None:
+        raise ValueError("roundtrip calendar cursor requires a return date")
+    if not round_trip and cursor.return_date is not None:
+        raise ValueError("one-way calendar cursor cannot contain a return date")
+
+
+def _history_run_minima(
+    *,
+    search_query: SearchQuery,
+    filters: FareFilterSpec,
+    since: datetime,
+    as_of: datetime,
+    cte_name: str = "history_run_minima",
+) -> CTE:
+    conditions: list[ColumnElement[bool]] = [
+        PriceObservation.search_query_id == search_query.id,
+        PriceObservation.currency == search_query.currency,
+        PriceObservation.observed_at >= since,
+        PriceObservation.observed_at <= as_of,
+    ]
+    if filters.direct_only:
+        conditions.append(PriceObservation.is_direct.is_(True))
+    if filters.max_price_minor is not None:
+        conditions.append(PriceObservation.total_price_minor <= filters.max_price_minor)
+    if not filters.requires_itinerary_scan:
+        conditions.append(PriceObservation.is_lowest.is_(True))
+
+    statement = (
+        select(
+            PriceObservation.collection_run_id.label("run_id"),
+            PriceObservation.observed_at.label("observed_at"),
+            func.min(PriceObservation.total_price_minor).label("price_minor"),
+        )
+        .where(*conditions)
+        .group_by(PriceObservation.collection_run_id, PriceObservation.observed_at)
+    )
+    if filters.requires_itinerary_scan:
+        statement = statement.join(
+            Itinerary,
+            Itinerary.id == PriceObservation.itinerary_id,
+        ).where(
+            Itinerary.search_query_id == search_query.id,
+            *itinerary_filter_conditions(filters),
+        )
+    return statement.cte(cte_name)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

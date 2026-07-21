@@ -1,0 +1,26 @@
+{
+  "status": 0,
+  "data": {
+    "currencyCode": "CNY",
+    "lowestPriceList": [
+      {
+        "departDate": "2026-09-03",
+        "returnDate": "2026-09-08",
+        "price": 1975,
+        "totalPrice": 3950
+      },
+      {
+        "departDate": "2026-09-03",
+        "returnDate": "2026-09-10",
+        "price": 2050,
+        "totalPrice": 4100
+      },
+      {
+        "departDate": "2026-09-05",
+        "returnDate": "2026-09-10",
+        "price": 1888,
+        "totalPrice": 3776
+      }
+    ]
+  }
+}

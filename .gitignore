@@ -22,6 +22,7 @@ web/.vite/
 artifacts/
 data/
 *.log
+server/celerybeat-schedule*
 
 # Browser state and captures must never be committed.
 playwright/.auth/

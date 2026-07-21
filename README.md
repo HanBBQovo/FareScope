@@ -1,49 +1,132 @@
 # FareScope
 
-FareScope is a self-hosted airfare data and decision platform. It collects fare calendars and itinerary quotes, preserves historical observations, exposes route analytics, and evaluates subscription alert rules.
+FareScope is a self-hosted airfare data and decision platform. It collects page-generated fare
+calendars and itinerary quotes, stores normalized history in PostgreSQL, exposes current and
+historical views, and evaluates per-user subscription alerts with durable delivery records.
 
-This repository is a new implementation. It does not reuse the legacy `flightAlert` code.
+This is a new server-side Web implementation. It does not reuse the legacy `flightAlert` code.
 
 ## Current status
 
-The project is in the foundation phase. The API health endpoint, development services, frontend template, CI skeleton, and living implementation plan are present. Provider collection and product pages are not implemented yet.
+The core product runs locally end to end:
 
-The authoritative scope, evidence matrix, roadmap, and progress log live in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
+- username/password registration with no email or invitation flow;
+- owner-scoped subscriptions and notification channels with shared canonical collection;
+- one-way/round-trip exploration, direct and local result filters, current detailed offers when the
+  provider returns them, history, low-fare calendars, and round-trip matrices;
+- headed Google Chrome collection with leases, pacing, retries, partial-data handling, and schema
+  diagnostics;
+- alert rules, events, Webhook/Telegram/Bark/PushPlus delivery, retry, and delivery audit;
+- async FastAPI, Celery process isolation, PostgreSQL partitions/snapshots, Redis, and production
+  PgBouncer topology;
+- real dashboard aggregates, keyset pagination, readiness, request IDs, and a reproducible
+  PostgreSQL performance workload.
+
+The latest live `SHA-TYO` round-trip run stored 1,130 latest calendar snapshots. Ctrip returned no
+detailed offers for that sample after three bounded attempts, so FareScope reports a visible
+`partial_fare_data` warning instead of fabricating a price. Detailed itinerary contracts are
+covered by redacted one-way/round-trip fixtures and have also been observed on another live route.
+
+Target-server egress, large concurrent/cold-cache testing, automated retention, exports, quiet
+hours, and history-dependent predictions remain open. The authoritative evidence and checklist are
+in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
 
 ## Repository layout
 
 ```text
 FareScope/
-├── web/                 # Vite + React + TypeScript + shadcn frontend
-├── server/              # FastAPI modular monolith and worker entrypoints
-├── docs/                # Living product and implementation plan
-├── compose.yaml         # PostgreSQL and Redis development services
-└── .github/workflows/   # Baseline CI
+|-- web/                       # React + TypeScript Web application
+|-- server/                    # FastAPI API, domain modules, workers, tests
+|-- server/alembic/            # PostgreSQL migrations
+|-- server/performance/        # representative data generator and SQL profiler
+|-- deploy/                    # collector, PgBouncer, and Web runtime assets
+|-- docs/                      # living plan, deployment, and performance contracts
+|-- compose.yaml               # local PostgreSQL and Redis
+`-- compose.production.yaml    # production-shaped multi-process topology
 ```
 
 ## Local development
 
-Start PostgreSQL and Redis:
+Prerequisites: Python 3.12, `uv`, Node.js 22, Docker Compose, and Google Chrome. Chromium is an
+explicit fallback but has been less reliable against the current provider path.
+
+Create local configuration and dependencies:
 
 ```bash
 cp .env.example .env
 docker compose up -d postgres redis
+cd server
+uv sync --extra dev --extra collector
+uv run alembic upgrade head
 ```
 
-Start the API:
+Generate a Fernet key and place it in `.env` as `FARESCOPE_SECRET_ENCRYPTION_KEY` before creating
+notification channels:
 
 ```bash
 cd server
-uv sync --extra dev
+uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Run the API:
+
+```bash
+cd server
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-Start the frontend:
+Run background processes in separate terminals:
+
+```bash
+cd server
+uv run celery -A app.tasks.celery_app:celery_app worker \
+  --queues=default,analysis,notifications --loglevel=INFO
+
+uv run --extra collector celery -A app.tasks.celery_app:celery_app worker \
+  --queues=collector --concurrency=1 --loglevel=INFO
+
+uv run celery -A app.tasks.celery_app:celery_app beat --loglevel=INFO
+```
+
+For macOS local debugging, add `--pool=solo --concurrency=1` to each worker. Production runs the
+collector under Xvfb; see [deploy/collector/CHROME_RUNTIME.md](deploy/collector/CHROME_RUNTIME.md).
+
+Run the frontend and point its proxy at the API port:
 
 ```bash
 cd web
 npm ci
-npm run dev
+APP_API_PORT=8000 npm run dev
 ```
 
-The API liveness endpoint is `GET http://localhost:8000/api/health/live`. The frontend development server uses `http://localhost:5278`.
+Open <http://localhost:5278/> and register with a username plus a password of at least 4 characters.
+No email is required. Liveness is `GET /api/health/live`; dependency-aware readiness is
+`GET /api/health/ready`.
+
+## Verification
+
+```bash
+cd server
+uv run ruff check .
+uv run pytest -q
+FARESCOPE_TEST_DATABASE_URL=postgresql+asyncpg://farescope:farescope@127.0.0.1:5432/farescope \
+  uv run pytest -q
+uv run alembic check
+
+cd ../web
+npm run lint
+npm run build
+
+cd ..
+docker compose -f compose.yaml config --quiet
+docker compose --env-file deploy/production.env.example \
+  -f compose.production.yaml config --quiet
+```
+
+Live provider tests are opt-in and must use a fresh browser context. They do not mount personal
+profiles, reuse cookies, bypass challenges, or save raw response bodies.
+
+## Deployment
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). GitHub Actions currently runs code checks only. Docker
+image build and publication are intentionally skipped while build/registry quota is unavailable.

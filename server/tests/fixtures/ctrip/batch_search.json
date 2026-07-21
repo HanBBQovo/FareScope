@@ -1,0 +1,95 @@
+{
+  "status": 0,
+  "data": {
+    "context": {
+      "currency": "CNY"
+    },
+    "flightItineraryList": [
+      {
+        "itineraryId": "redacted-itinerary-direct",
+        "duration": 185,
+        "flightSegments": [
+          {
+            "duration": "3h 5m",
+            "flightList": [
+              {
+                "flightNo": "ZZ101",
+                "airlineCode": "ZZ",
+                "airlineName": "Redacted Air",
+                "operatingAirlineCode": "ZZ",
+                "operatingFlightNo": "ZZ101",
+                "departureAirportCode": "PVG",
+                "departureAirportName": "Shanghai Redacted Airport",
+                "departureTerminal": "T1",
+                "departureDateTime": "2026-08-15T09:05:00+08:00",
+                "departureTimeZone": "Asia/Shanghai",
+                "arrivalAirportCode": "NRT",
+                "arrivalAirportName": "Tokyo Redacted Airport",
+                "arrivalTerminal": "T2",
+                "arrivalDateTime": "2026-08-15T13:10:00+09:00",
+                "arrivalTimeZone": "Asia/Tokyo",
+                "duration": 185,
+                "stopList": []
+              }
+            ]
+          }
+        ],
+        "priceList": [
+          {
+            "priceId": "redacted-offer-1",
+            "currency": "CNY",
+            "adultPrice": 1680,
+            "adultTax": 500,
+            "totalPrice": 2180,
+            "seatCount": 4
+          }
+        ]
+      },
+      {
+        "itineraryId": "redacted-itinerary-transfer",
+        "durationMinutes": 430,
+        "flightSegments": [
+          {
+            "durationMinutes": 430,
+            "flightList": [
+              {
+                "flightNo": "YY202",
+                "marketAirlineCode": "YY",
+                "airlineName": "Example Airways",
+                "departAirportCode": "SHA",
+                "departAirportName": "Shanghai Example Airport",
+                "departDateTime": "2026-08-15 07:30:00",
+                "arriveAirportCode": "KIX",
+                "arriveAirportName": "Osaka Example Airport",
+                "arriveDateTime": "2026-08-15 10:45:00",
+                "durationMinutes": 135,
+                "stopList": []
+              },
+              {
+                "flightNo": "YY203",
+                "marketAirlineCode": "YY",
+                "airlineName": "Example Airways",
+                "departAirportCode": "KIX",
+                "departDateTime": "2026-08-15 12:20:00",
+                "arriveAirportCode": "HND",
+                "arriveDateTime": "2026-08-15 13:35:00",
+                "durationMinutes": 75,
+                "stopList": []
+              }
+            ]
+          }
+        ],
+        "priceInfoList": [
+          {
+            "offerId": "redacted-offer-2",
+            "currencyCode": "CNY",
+            "adultBasePrice": "1420.50",
+            "adultTaxPrice": "430.25",
+            "totalAmount": "1850.75",
+            "seatsRemaining": "2"
+          }
+        ]
+      }
+    ]
+  }
+}

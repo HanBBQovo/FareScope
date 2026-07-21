@@ -61,13 +61,13 @@ export function PageShell({
   return (
     <div className={cn('ops-page-shell', WIDTH_CLASS[width], className)}>
       <div className={cn('ops-page-header', headerClassName)}>
-        <div className="min-w-0 space-y-1">
+        <div className="flex min-w-0 flex-col gap-1">
           <h1 className="text-xl font-semibold tracking-tight text-foreground md:text-2xl">{title}</h1>
           {description ? (
             <p className="max-w-3xl text-sm text-muted-foreground md:text-base">{description}</p>
           ) : null}
         </div>
-        {actions ? <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 self-start">{actions}</div> : null}
+        {actions ? <div className="flex min-w-0 w-full shrink-0 flex-wrap items-center justify-start gap-2 self-start md:w-auto md:justify-end">{actions}</div> : null}
       </div>
       {children}
     </div>
@@ -89,7 +89,7 @@ export function PageSurface({
     <section className={cn('ops-surface', className)}>
       {hasHeader ? (
         <div className="ops-surface-header">
-          <div className="min-w-0 space-y-1">
+          <div className="flex min-w-0 flex-col gap-1">
             {title ? <h2 className="text-base font-semibold tracking-tight text-foreground">{title}</h2> : null}
             {description ? <p className="text-sm text-muted-foreground">{description}</p> : null}
           </div>

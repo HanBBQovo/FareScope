@@ -1,255 +1,179 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type ElementType } from 'react'
+import { useEffect, useMemo, useState, type ElementType } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Boxes,
-  ChevronLeft,
-  ChevronRight,
-  LayoutDashboard,
+  BellRing,
+  ChartNoAxesCombined,
+  DatabaseZap,
+  Gauge,
   LogOut,
-  PanelLeft,
-  Settings,
+  Menu,
+  PlaneTakeoff,
+  Search,
+  Tags,
 } from 'lucide-react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 
-import { logout } from '@/api/auth'
-import { ChunkLoadBoundary } from '@/components/ChunkLoadBoundary'
-import { PageLoader } from '@/components/PageLoader'
+import { getSession, logout, sessionQueryKey } from '@/api/auth'
 import { ThemeToggleButton } from '@/components/theme'
 import { Button } from '@/components/ui/button'
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { BRAND_NAME, nsKey } from '@/config'
-import { AnimatePresence, motion } from '@/lib/motion'
+import { BRAND_NAME } from '@/config'
 import { cn } from '@/lib/utils'
 
-const Overview = lazy(() => import('@/pages/Overview'))
-const SettingsPage = lazy(() => import('@/pages/Settings'))
-
-/**
- * 应用外壳:侧栏导航 + 顶栏 + 内容区。
- *
- * 这里用 useState 在几个页面间切换,而不是引入 react-router —— 对「登录后单视图、
- * 页面数有限、无深链接需求」的内部后台,这是刻意取舍(见 README「为什么不引路由」)。
- * 真要做深链接/多级路由时,把 `currentPage` 状态换成 router 即可,其余结构不动。
- */
-
-type Page = 'overview' | 'settings'
-
 interface NavItem {
-  key: Page
+  path: string
   label: string
+  description: string
   icon: ElementType
 }
 
-const navItems: NavItem[] = [
-  { key: 'overview', label: '概览', icon: LayoutDashboard },
-  { key: 'settings', label: '设置', icon: Settings },
+const navGroups: Array<{ label: string; items: NavItem[] }> = [
+  {
+    label: '价格监控',
+    items: [
+      { path: '/overview', label: '总览', description: '价格与订阅摘要', icon: Gauge },
+      { path: '/explore', label: '航线探索', description: '查询当前航班报价', icon: Search },
+      { path: '/subscriptions', label: '订阅管理', description: '维护个人价格提醒', icon: Tags },
+      { path: '/history', label: '价格历史', description: '查看长期价格走势', icon: ChartNoAxesCombined },
+    ],
+  },
+  {
+    label: '系统',
+    items: [
+      { path: '/collection', label: '采集状态', description: '检查任务健康度', icon: DatabaseZap },
+      { path: '/notifications', label: '通知与告警', description: '配置推送渠道与价格规则', icon: BellRing },
+    ],
+  },
 ]
 
-const PAGE_STORAGE_KEY = nsKey('last-page')
+const flatNavItems = navGroups.flatMap((group) => group.items)
 
-function isPage(value: string | null): value is Page {
-  return navItems.some((item) => item.key === value)
-}
-
-function readStoredPage(): Page {
-  if (typeof window === 'undefined') return 'overview'
-  const value = window.localStorage.getItem(PAGE_STORAGE_KEY)
-  return isPage(value) ? value : 'overview'
-}
-
-interface DashboardProps {
-  onLogout: () => void
-}
-
-export default function Dashboard({ onLogout }: DashboardProps) {
-  const [currentPage, setCurrentPage] = useState<Page>(() => readStoredPage())
-  const [collapsed, setCollapsed] = useState(false)
-  const [mobileNavOpen, setMobileNavOpen] = useState(false)
-  const [isMobileViewport, setIsMobileViewport] = useState(false)
-
-  const currentItem = useMemo(
-    () => navItems.find((item) => item.key === currentPage) || navItems[0],
-    [currentPage],
+function Brand() {
+  return (
+    <div className="flex h-16 items-center gap-3 border-b px-4">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+        <PlaneTakeoff className="size-5" aria-hidden="true" />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate text-base font-semibold">{BRAND_NAME}</div>
+        <div className="truncate text-xs text-muted-foreground">机票价格观察台</div>
+      </div>
+    </div>
   )
-  const CurrentIcon = currentItem.icon
+}
+
+function Navigation({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <nav className="flex flex-col gap-5 px-3 py-4" aria-label="主导航">
+      {navGroups.map((group) => (
+        <div key={group.label} className="flex flex-col gap-1">
+          <p className="px-3 pb-1 text-xs font-medium text-muted-foreground">{group.label}</p>
+          {group.items.map((item) => {
+            const Icon = item.icon
+            return (
+              <NavLink
+                key={item.path}
+                to={item.path}
+                onClick={onNavigate}
+                className={({ isActive }) => cn(
+                  'flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                )}
+              >
+                <Icon className="size-4 shrink-0" aria-hidden="true" />
+                <span className="truncate">{item.label}</span>
+              </NavLink>
+            )
+          })}
+        </div>
+      ))}
+    </nav>
+  )
+}
+
+export default function Dashboard() {
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const location = useLocation()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const session = useQuery({ queryKey: sessionQueryKey, queryFn: getSession, staleTime: 60_000 })
+  const currentItem = useMemo(
+    () => flatNavItems.find((item) => location.pathname.startsWith(item.path)) || flatNavItems[0],
+    [location.pathname],
+  )
 
   useEffect(() => {
     document.title = `${currentItem.label} - ${BRAND_NAME}`
-    window.localStorage.setItem(PAGE_STORAGE_KEY, currentPage)
-  }, [currentItem.label, currentPage])
-
-  useEffect(() => {
-    const media = window.matchMedia('(max-width: 767px)')
-    const syncViewport = () => {
-      setIsMobileViewport(media.matches)
-      if (!media.matches) setMobileNavOpen(false)
-    }
-    syncViewport()
-    media.addEventListener('change', syncViewport)
-    return () => media.removeEventListener('change', syncViewport)
-  }, [])
+  }, [currentItem.label])
 
   const handleLogout = async () => {
     await logout()
-    onLogout()
+    queryClient.removeQueries({ queryKey: sessionQueryKey })
+    navigate('/login', { replace: true })
   }
-
-  const renderNavItem = (item: NavItem, options?: { collapsed?: boolean; onSelect?: () => void }) => {
-    const active = currentPage === item.key
-    const Icon = item.icon
-    const compact = options?.collapsed ?? collapsed
-    const button = (
-      <button
-        type="button"
-        key={item.key}
-        data-active={active}
-        className={cn(
-          'dashboard-nav-item flex w-full items-center rounded-md py-2.5 text-left text-sm font-medium transition-colors',
-          active
-            ? 'bg-primary text-primary-foreground'
-            : 'text-gray-700 hover:bg-gray-100 dark:text-slate-300 dark:hover:bg-white/[0.05] dark:hover:text-white',
-          compact ? 'justify-center px-2.5' : 'gap-3 px-3',
-        )}
-        onClick={() => {
-          setCurrentPage(item.key)
-          options?.onSelect?.()
-        }}
-      >
-        <Icon className="h-4 w-4 shrink-0" />
-        {!compact ? <span className="min-w-0 flex-1 truncate">{item.label}</span> : null}
-      </button>
-    )
-
-    if (!compact) return button
-
-    return (
-      <Tooltip key={item.key}>
-        <TooltipTrigger asChild>{button}</TooltipTrigger>
-        <TooltipContent side="right" sideOffset={8}>
-          <p>{item.label}</p>
-        </TooltipContent>
-      </Tooltip>
-    )
-  }
-
-  const sidebar = (compact = collapsed, onSelect?: () => void) => (
-    <nav className="flex flex-col gap-1">
-      {navItems.map((item) => renderNavItem(item, { collapsed: compact, onSelect }))}
-    </nav>
-  )
 
   return (
-    <TooltipProvider delayDuration={0}>
-      <div className="dashboard-shell flex h-screen overflow-hidden bg-muted/30">
-        {/* 桌面侧栏:折叠态宽度用 spring 过渡 */}
-        <motion.aside
-          className="dashboard-aside relative hidden h-full shrink-0 flex-col border-r bg-background md:flex"
-          animate={{ width: collapsed ? 68 : 256 }}
-          transition={{ type: 'spring', bounce: 0.15, duration: 0.4 }}
-        >
-          <div className="flex h-16 items-center border-b px-4">
-            <button
-              type="button"
-              onClick={() => setCollapsed((value) => !value)}
-              className={cn(
-                'grid w-full items-center gap-3 overflow-hidden rounded-xl text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                collapsed ? 'grid-cols-[36px_0px]' : 'grid-cols-[36px_minmax(0,1fr)]',
-              )}
-            >
-              <div className="dashboard-brand-mark flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-md shadow-primary/25">
-                <Boxes className="h-5 w-5" />
-              </div>
-              <div className={cn('min-w-0 overflow-hidden whitespace-nowrap text-lg font-bold tracking-tight transition-opacity', collapsed ? 'opacity-0' : 'opacity-100')}>
-                {BRAND_NAME}
-              </div>
-            </button>
+    <TooltipProvider delayDuration={120}>
+      <div className="flex min-h-screen bg-muted/30">
+        <aside className="fixed inset-y-0 left-0 hidden w-60 border-r bg-background md:flex md:flex-col">
+          <Brand />
+          <div className="min-h-0 flex-1 overflow-y-auto">
+          <Navigation />
           </div>
-
-          <div className="scrollbar-none flex-1 overflow-y-auto px-3 py-4">{sidebar()}</div>
-
           <div className="border-t p-3">
-            <Button variant="ghost" size="sm" className="w-full justify-center" onClick={() => setCollapsed((value) => !value)}>
-              {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-            </Button>
-          </div>
-        </motion.aside>
-
-        {/* 移动端抽屉 */}
-        <AnimatePresence>
-          {isMobileViewport && mobileNavOpen ? (
-            <>
-              <motion.button
-                type="button"
-                className="fixed inset-0 z-40 bg-black/42 md:hidden dark:bg-black/64"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setMobileNavOpen(false)}
-                aria-label="关闭导航"
-              />
-              <motion.aside
-                className="dashboard-mobile-drawer fixed inset-y-0 left-0 z-50 flex w-[288px] max-w-[86vw] flex-col border-r bg-background md:hidden"
-                initial={{ x: -320 }}
-                animate={{ x: 0 }}
-                exit={{ x: -320 }}
-                transition={{ type: 'spring', bounce: 0.1, duration: 0.35 }}
-              >
-                <div className="flex h-16 items-center border-b px-4">
-                  <div className="flex items-center gap-3">
-                    <div className="dashboard-brand-mark flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-md shadow-primary/25">
-                      <Boxes className="h-5 w-5" />
-                    </div>
-                    <div className="text-lg font-bold tracking-tight">{BRAND_NAME}</div>
-                  </div>
-                </div>
-                <div className="scrollbar-none flex-1 overflow-y-auto px-3 py-4">{sidebar(false, () => setMobileNavOpen(false))}</div>
-              </motion.aside>
-            </>
-          ) : null}
-        </AnimatePresence>
-
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="scrollbar-none flex-1 overflow-y-auto">
-            <header className="dashboard-header sticky top-0 z-10 flex h-16 items-center gap-3 border-b bg-background px-4 md:px-6">
-              <motion.div
-                key={currentPage}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ type: 'spring', bounce: 0.15, duration: 0.35 }}
-                className="flex min-w-0 flex-1 items-center gap-3"
-              >
-                {isMobileViewport ? (
-                  <Button variant="outline" size="icon" className="h-9 w-9 md:hidden" onClick={() => setMobileNavOpen(true)}>
-                    <PanelLeft className="h-4 w-4" />
-                  </Button>
-                ) : null}
-                <CurrentIcon className="h-5 w-5 text-primary" />
-                <h2 className="truncate text-base font-semibold md:text-lg">{currentItem.label}</h2>
-              </motion.div>
-
-              <div className="ml-auto flex min-w-0 items-center gap-2">
-                <ThemeToggleButton compact={isMobileViewport} showLabel={!isMobileViewport} />
-                <Button variant="outline" size={isMobileViewport ? 'icon' : undefined} className="gap-2" onClick={handleLogout}>
-                  <LogOut className="h-4 w-4" />
-                  {!isMobileViewport ? <span>退出登录</span> : null}
-                </Button>
+            <div className="flex items-center gap-3 rounded-md px-2 py-2">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground">
+                {session.data?.user?.username.slice(0, 1).toUpperCase() || 'F'}
               </div>
-            </header>
-
-            <main className="p-4 md:p-6">
-              <ChunkLoadBoundary scopeLabel={currentItem.label}>
-                <Suspense fallback={<PageLoader />}>
-                  <motion.div
-                    key={currentPage}
-                    initial={{ opacity: 0, y: 20, scale: 0.99 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    transition={{ type: 'spring', bounce: 0.15, duration: 0.4 }}
-                  >
-                    {currentPage === 'overview' ? <Overview /> : null}
-                    {currentPage === 'settings' ? <SettingsPage /> : null}
-                  </motion.div>
-                </Suspense>
-              </ChunkLoadBoundary>
-            </main>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium">{session.data?.user?.username || 'FareScope 用户'}</div>
+                <div className="truncate text-xs text-muted-foreground">用户名登录</div>
+              </div>
+            </div>
           </div>
+        </aside>
+
+        <div className="flex min-w-0 flex-1 flex-col md:pl-60">
+          <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur md:px-6">
+            <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+              <SheetTrigger asChild>
+                <Button type="button" variant="outline" size="icon" className="md:hidden" aria-label="打开导航">
+                  <Menu aria-hidden="true" />
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="left" className="flex flex-col p-0" hideClose>
+                <SheetHeader className="sr-only">
+                  <SheetTitle>FareScope 导航</SheetTitle>
+                </SheetHeader>
+                <Brand />
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                    <Navigation onNavigate={() => setMobileOpen(false)} />
+                </div>
+              </SheetContent>
+            </Sheet>
+
+            <div className="min-w-0 flex-1">
+              <h1 className="truncate text-base font-semibold">{currentItem.label}</h1>
+              <p className="hidden truncate text-xs text-muted-foreground sm:block">{currentItem.description}</p>
+            </div>
+
+            <ThemeToggleButton compact />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="outline" size="icon" onClick={handleLogout} aria-label="退出登录">
+                  <LogOut aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>退出登录</TooltipContent>
+            </Tooltip>
+          </header>
+
+          <main className="min-w-0 flex-1 p-4 md:p-6">
+            <Outlet />
+          </main>
         </div>
       </div>
     </TooltipProvider>

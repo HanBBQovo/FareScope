@@ -1,0 +1,23 @@
+{
+  "status": 0,
+  "data": {
+    "currency": "CNY",
+    "priceList": [
+      {
+        "departDate": "2026-08-14",
+        "price": 2310,
+        "totalPrice": 2310
+      },
+      {
+        "departDate": "2026-08-15",
+        "price": "2180",
+        "totalPrice": "CNY 2180"
+      },
+      {
+        "departDate": "2026-08-16",
+        "price": 2265.5,
+        "totalPrice": 2265.5
+      }
+    ]
+  }
+}

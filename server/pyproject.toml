@@ -8,11 +8,15 @@ version = "0.1.0"
 description = "FareScope API, collection, analysis, and notification services"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-  "alembic>=1.15,<2",
-  "asyncpg>=0.30,<1",
-  "celery[redis]>=5.5,<6",
-  "fastapi>=0.115,<1",
-  "pydantic-settings>=2.8,<3",
+    "alembic>=1.15,<2",
+    "asyncpg>=0.30,<1",
+    "celery[redis]>=5.5,<6",
+    "cryptography>=45,<47",
+    "email-validator>=2.2,<3",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "pydantic-settings>=2.8,<3",
+  "pwdlib[argon2]>=0.2,<1",
   "sqlalchemy[asyncio]>=2.0.38,<3",
   "structlog>=25.1,<26",
   "uvicorn[standard]>=0.34,<1",
@@ -23,7 +27,6 @@ collector = [
   "playwright==1.52.0",
 ]
 dev = [
-  "httpx>=0.28,<1",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<1",
   "ruff>=0.11,<1",
@@ -35,6 +38,9 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "postgres: requires a migrated PostgreSQL database configured for integration tests",
+]
 
 [tool.ruff]
 line-length = 100

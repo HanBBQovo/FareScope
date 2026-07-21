@@ -1,4 +1,5 @@
 import { StrictMode } from 'react'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { createRoot } from 'react-dom/client'
 
 import { nsKey } from '@/config'
@@ -8,6 +9,7 @@ import { ConfirmDialogProvider } from '@/components/ui/confirm-dialog'
 import { GlobalToastProvider } from '@/components/ui/global-toast'
 import { I18nProvider } from '@/i18n'
 import { installBrowserErrorLogging, logError, logWarn } from '@/lib/logger'
+import { queryClient } from '@/lib/query-client'
 
 import App from './App'
 import './fonts.css'
@@ -46,14 +48,16 @@ if (typeof window !== 'undefined') {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
-      <I18nProvider>
-        <GlobalToastProvider>
-          <ConfirmDialogProvider>
-            <FontLoadCoordinator />
-            <App />
-          </ConfirmDialogProvider>
-        </GlobalToastProvider>
-      </I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        <I18nProvider>
+          <GlobalToastProvider>
+            <ConfirmDialogProvider>
+              <FontLoadCoordinator />
+              <App />
+            </ConfirmDialogProvider>
+          </GlobalToastProvider>
+        </I18nProvider>
+      </QueryClientProvider>
     </ThemeProvider>
   </StrictMode>,
 )

@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+import ipaddress
+from urllib.parse import urlsplit
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import AuditEvent, NotificationChannel, User
+from app.security import SecretBox
+
+
+class NotificationChannelError(Exception):
+    pass
+
+
+class NotificationChannelNotFoundError(NotificationChannelError):
+    pass
+
+
+class NotificationChannelConflictError(NotificationChannelError):
+    pass
+
+
+async def list_notification_channels(
+    session: AsyncSession, *, user_id: UUID
+) -> list[NotificationChannel]:
+    return list(
+        (
+            await session.scalars(
+                select(NotificationChannel)
+                .where(NotificationChannel.user_id == user_id)
+                .order_by(NotificationChannel.created_at, NotificationChannel.id)
+                .limit(100)
+            )
+        ).all()
+    )
+
+
+async def create_notification_channel(
+    session: AsyncSession,
+    *,
+    user: User,
+    channel_type: str,
+    label: str,
+    destination: str,
+    secret_box: SecretBox,
+) -> NotificationChannel:
+    normalized_label = label.strip()
+    existing = await session.scalar(
+        select(NotificationChannel.id).where(
+            NotificationChannel.user_id == user.id,
+            NotificationChannel.name == normalized_label,
+        )
+    )
+    if existing is not None:
+        raise NotificationChannelConflictError("a channel with this name already exists")
+
+    normalized_destination = _normalize_destination(channel_type, destination)
+    masked_destination = mask_destination(channel_type, normalized_destination)
+    channel = NotificationChannel(
+        user_id=user.id,
+        name=normalized_label,
+        channel_type=channel_type,
+        enabled=True,
+        secret_ciphertext=secret_box.encrypt_mapping(
+            {"destination": normalized_destination}
+        ),
+        config_redacted={"destination_masked": masked_destination},
+    )
+    session.add(channel)
+    await session.flush()
+    session.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            action="notification_channel.created",
+            target_type="notification_channel",
+            target_id=str(channel.id),
+            metadata_json={"channel_type": channel_type},
+            summary=f"Notification channel created: {channel.name}",
+        )
+    )
+    return channel
+
+
+async def set_notification_channel_enabled(
+    session: AsyncSession,
+    *,
+    user: User,
+    channel_id: UUID,
+    enabled: bool,
+) -> NotificationChannel:
+    channel = await session.scalar(
+        select(NotificationChannel)
+        .where(NotificationChannel.id == channel_id, NotificationChannel.user_id == user.id)
+        .with_for_update()
+    )
+    if channel is None:
+        raise NotificationChannelNotFoundError
+    channel.enabled = enabled
+    session.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            action=(
+                "notification_channel.enabled"
+                if enabled
+                else "notification_channel.disabled"
+            ),
+            target_type="notification_channel",
+            target_id=str(channel.id),
+            summary="Notification channel state changed",
+        )
+    )
+    await session.flush()
+    return channel
+
+
+def mask_destination(channel_type: str, destination: str) -> str:
+    if channel_type == "email":
+        local, domain = destination.split("@", 1)
+        return f"{local[:1]}***@{domain}"
+    if channel_type == "webhook":
+        parsed = urlsplit(destination)
+        return f"{parsed.scheme}://{parsed.netloc}/***"
+    visible = destination[-4:] if len(destination) > 4 else destination[-1:]
+    return f"***{visible}"
+
+
+def _normalize_destination(channel_type: str, destination: str) -> str:
+    value = destination.strip()
+    if channel_type == "email":
+        raise NotificationChannelError("email delivery is not configured")
+    if channel_type == "webhook":
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise NotificationChannelError("webhook destination must be an HTTPS URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise NotificationChannelError("webhook URL must not contain credentials")
+        _reject_private_host(parsed.hostname)
+    elif channel_type == "telegram":
+        token, separator, chat_id = value.partition("|")
+        if not separator:
+            token, separator, chat_id = value.rpartition(":")
+        if not separator or not token.strip() or not chat_id.strip():
+            raise NotificationChannelError("Telegram destination must be BOT_TOKEN|CHAT_ID")
+    elif channel_type == "bark" and value.startswith("https://"):
+        parsed = urlsplit(value)
+        if parsed.username is not None or parsed.password is not None:
+            raise NotificationChannelError("Bark URL must not contain credentials")
+        _reject_private_host(parsed.hostname or "")
+    elif channel_type == "pushplus" and not value:
+        raise NotificationChannelError("PushPlus token is empty")
+    return value
+
+
+def _reject_private_host(hostname: str) -> None:
+    normalized = hostname.strip().lower().rstrip(".")
+    if not normalized or normalized in {"localhost", "localhost.localdomain"}:
+        raise NotificationChannelError("notification host is not allowed")
+    if normalized.endswith((".local", ".internal", ".lan")):
+        raise NotificationChannelError("notification host is not allowed")
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return
+    if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+        raise NotificationChannelError("notification host is not allowed")
