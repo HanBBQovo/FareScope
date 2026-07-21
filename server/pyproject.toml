@@ -16,10 +16,12 @@ dependencies = [
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
     "pydantic-settings>=2.8,<3",
-  "pwdlib[argon2]>=0.2,<1",
-  "sqlalchemy[asyncio]>=2.0.38,<3",
-  "structlog>=25.1,<26",
-  "uvicorn[standard]>=0.34,<1",
+    "redis>=5.2,<7",
+    "pwdlib[argon2]>=0.2,<1",
+    "sqlalchemy[asyncio]>=2.0.38,<3",
+    "structlog>=25.1,<26",
+    "tzdata>=2025.2",
+    "uvicorn[standard]>=0.34,<1",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +42,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
   "postgres: requires a migrated PostgreSQL database configured for integration tests",
+  "redis: requires a Redis instance configured for integration tests",
 ]
 
 [tool.ruff]

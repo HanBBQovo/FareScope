@@ -101,7 +101,8 @@ FareScope is a modular monolith with isolated runtime processes:
 - `analysis`: collection-result aggregation and alert evaluation queue.
 - `notification`: durable delivery claims, network sends, retry, and audit queue.
 - PostgreSQL 16: source of truth, monthly range partitions, latest snapshots, and aggregates.
-- Redis: Celery broker/result state; never the only copy of business data.
+- Redis: Celery broker/result state plus cross-process/host collection coordination; never the only
+  copy of business data.
 - PgBouncer: production transaction-pooling boundary.
 
 Provider adapters and browser dependencies are isolated from the API package boundary. Browser or
@@ -115,8 +116,8 @@ pool sizes, statement timeouts, keyset pagination, and query limits are explicit
    filters into a stable query hash.
 3. The scheduler groups due subscriptions by canonical query and creates an idempotent run.
 4. A short dispatch lease is committed before the Celery message is published.
-5. The collector fences the lease, enters provider/route concurrency and pacing gates, then opens
-   a fresh headed Chrome context.
+5. The collector fences the lease, acquires Redis-backed provider/route concurrency and pacing
+   slots with owner tokens and heartbeat renewal, then opens a fresh headed Chrome context.
 6. Page-generated responses are captured by allowlisted routes; richer repeated responses replace
    context-only envelopes during a bounded settle period.
 7. Calendar, itinerary, segment, offer, observation, schema, and latest-snapshot rows are persisted
@@ -127,8 +128,11 @@ pool sizes, statement timeouts, keyset pagination, and query limits are explicit
 10. Notification workers claim deliveries with `SKIP LOCKED`, send outside the transaction, and
     record success or bounded retry state.
 
-The current gate coordinates one collector process. Multiple collector processes or hosts must use
-conservative per-process limits until a shared rate-limit coordinator is implemented.
+Production collection coordination is shared through Redis Lua operations using Redis server time,
+TTL-based crash recovery, fenced release, minimum route intervals, and bounded jitter. Coordination
+failure is fail-closed: the active browser task is canceled and the durable run enters its bounded
+retry schedule instead of silently multiplying provider traffic. The process-local gate remains
+available only for development and isolated tests.
 
 ## Implemented data model
 
@@ -139,7 +143,7 @@ conservative per-process limits until a shared rate-limit coordinator is impleme
 - Fares: `itineraries`, `segments`, `fare_offers`, partitioned `price_observations`, latest price
   snapshots, partitioned calendar observations, latest calendar snapshots, daily aggregates.
 - Alerts: `alert_rules`, rule-channel links, `alert_events`, `notification_channels`, and
-  `notification_deliveries`.
+  `notification_deliveries`, including per-channel time zone, quiet hours, and allowed weekdays.
 
 Money uses integer minor units plus currency. Timestamps use UTC. Provider-local timestamps retain
 their time-zone context. A notification target price is separate from a result maximum-price
@@ -158,8 +162,11 @@ filter; a target must never hide the current price it is meant to monitor.
 - Alert rule creation, channel selection, enable/disable, delete, event pagination, and delivery
   audit.
 - Webhook, Telegram, Bark, and PushPlus channel creation/toggle with encrypted secrets.
+- Per-channel IANA time zone, quiet-hour, and allowed-weekday schedules with cross-midnight and DST
+  handling; deferred messages remain durable until their next permitted delivery time.
 - Collection operations page with health, pagination, attempts, calendar/itinerary/offer counts,
-  upstream status, errors, and explicit calendar-only warnings.
+  upstream status, errors, explicit calendar-only warnings, queue depths, user-scoped run states,
+  schema fingerprints, safe top-level field summaries, and diagnostic detail.
 - Loading, empty, error, stale, unavailable, and responsive layouts. Demo fare fallback is removed.
 
 The production bundle uses explicit vendor chunks. The main entry fell from about 533 kB to about
@@ -182,9 +189,14 @@ Three warm local runs measured:
 
 At the hard 100-route dashboard limit, latest and trend application requests measured about 109 ms
 and 127 ms. This is within the current local target but scales linearly, so the limit must not be
-raised without a snapshot/aggregate redesign. The 14.4-million-observation large profile,
-concurrent clients, cold-cache behavior, and production hardware remain unverified. See
-`docs/PERFORMANCE.md` for the full contract and reproduction commands.
+raised without a snapshot/aggregate redesign. A subsequent set-based implementation removed the
+per-route SQL union and repeated planning overhead. With the same 8+4 connection pool, 32 concurrent
+dashboard API requests completed with 0/80 errors instead of 4/80 timeouts; p95 fell from 2,691 ms
+to 1,655 ms and throughput rose from 15.5 to 23.4 requests/second. Pool-wait p95 remained about
+784 ms at that intentionally saturated level, so this is improved evidence rather than a claim that
+high-concurrency capacity work is finished. The 14.4-million-observation large profile, cold-cache
+behavior, and production hardware remain unverified. See `docs/PERFORMANCE.md` for the full contract
+and reproduction commands.
 
 ## Roadmap
 
@@ -201,20 +213,22 @@ concurrent clients, cold-cache behavior, and production hardware remain unverifi
 - [x] Redacted one-way, round-trip, and detailed itinerary fixtures with parser contracts.
 - [x] Schema diagnostics, optional failure screenshots, partial-data states, and no raw-body default.
 - [x] Provider/route concurrency, pacing, jitter, retry backoff, leases, and fencing.
+- [x] Redis cross-process/host coordination with atomic acquisition, owner fencing, heartbeat
+  cancellation, TTL recovery, and fail-closed durable retry.
 - [x] Scheduler-to-dispatch-to-collector-to-PostgreSQL integration tests.
 - [ ] Capture and compare a provider-UI direct-only interaction fixture.
 - [ ] Verify repeated live collection from the target server IP.
-- [ ] Add shared cross-process/host rate coordination before horizontally scaling collectors.
 
 ### M2: Persistence and price APIs
 
 - [x] Canonical query deduplication, monthly partitions, latest snapshots, and migrations through
-  `20260720_0010`.
+  `20260720_0012`.
 - [x] Calendar, itinerary, segment, offer, raw history, aggregate history, and collection health.
 - [x] Owner-scoped keyset pagination and bounded hot queries.
 - [x] Independent result filters and notification target prices.
 - [x] Reference-scale data generator, service-SQL profiler, and saved performance contract.
-- [ ] Automated partition retention/archive jobs and configurable retention controls.
+- [x] Automated two-stage partition lifecycle: 24-month hot default, non-destructive archive schema,
+  bounded maintenance actions, and explicitly opt-in purge after a longer horizon.
 - [ ] Run the large profile with concurrency and cold-cache evidence.
 
 ### M3: Minimal multi-user foundation
@@ -243,10 +257,12 @@ concurrent clients, cold-cache behavior, and production hardware remain unverifi
   delivery audit.
 - [x] PushPlus, Telegram, Bark, and HTTPS Webhook adapters with tests.
 - [x] Collection health, run history, retry, upstream status, and partial-data UI.
-- [ ] Quiet hours and per-channel delivery schedules.
+- [x] Quiet hours and per-channel delivery schedules with IANA time zones, weekdays, cross-midnight,
+  and DST behavior.
 - [ ] Optional email delivery after an SMTP backend is configured; email remains unrelated to login.
-- [ ] Background CSV/JSON exports and retention controls.
-- [ ] Schema-drift detail UI, queue-depth metrics, and automated backup/restore drill.
+- [ ] Background CSV/JSON exports and archived-data access/restore workflow.
+- [x] Schema-drift detail UI and queue-depth metrics without exposing provider payload values.
+- [ ] Automated backup/restore drill.
 
 ### M6: Evidence-gated intelligence
 
@@ -305,6 +321,22 @@ A feature is complete only when all applicable items are true:
 - Measured representative PostgreSQL queries on the 480,000-observation reference profile and
   recorded residual 100-route linear dashboard cost.
 - Added readiness, request IDs, explicit collection data-quality fields, and vendor bundle chunks.
+- Replaced process-only collector pacing in production with Redis-backed cross-process/host slots,
+  heartbeat cancellation, fenced release, and fail-closed durable retries.
+- Added per-channel delivery schedules with IANA time zones, quiet hours, weekday restrictions,
+  cross-midnight behavior, and DST-tested delivery deferral.
+- Added collection queue depths, user-scoped pending/running/failure counts, schema signals, and safe
+  run diagnostics to the collection operations API and Web page.
+- Added bounded observation-partition lifecycle maintenance: old hot partitions are detached into
+  `farescope_archive`; permanent purge is disabled by default and requires an explicitly longer
+  retention horizon. Archived rows are retained but are not yet included in hot history APIs.
+- Reworked 100-route dashboard reads into set-based SQL. Under the reference 32-concurrent API
+  workload, timeouts fell from 4/80 to 0/80 and p95 from 2,691 ms to 1,655 ms; pool-wait p95 remains
+  a documented capacity limit.
+- Added reproducible service/ASGI concurrency tooling with exact confirmation and
+  `farescope_perf_` database-name safety gates on both Python and `psql` seed paths.
+- Aligned the Vite development proxy default with the documented local API port and verified the
+  active 5278 proxy against the current 8010 development API.
 - Passed full ordinary and PostgreSQL-backed test suites, Ruff, Alembic head/check, frontend lint
   and build, local/production Compose parsing, and live API workflow checks without building Docker
   images.

@@ -154,8 +154,21 @@ class CollectionRunPublic(BaseModel):
     max_attempts: int = Field(alias="maxAttempts")
     upstream_status: str | None = Field(alias="upstreamStatus")
     warning_code: str | None = Field(alias="warningCode")
+    schema_fingerprint: str | None = Field(alias="schemaFingerprint")
+    diagnostics: list["CollectionDiagnosticPublic"]
     duration_ms: int | None = Field(alias="durationMs")
     error_code: str | None = Field(alias="errorCode")
+
+
+class CollectionDiagnosticPublic(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    code: str
+    message: str
+    severity: Literal["warning", "error"]
+    path: str | None = None
+    observed_type: str | None = Field(default=None, alias="observedType")
+    retryable: bool | None = None
 
 
 class CollectionHealthPublic(BaseModel):
@@ -174,6 +187,44 @@ class CollectionRunListResponse(BaseModel):
     health: CollectionHealthPublic
     has_more: bool = Field(alias="hasMore")
     next_cursor: str | None = Field(default=None, alias="nextCursor")
+
+
+class CollectionRunCountsPublic(BaseModel):
+    ready: int
+    retrying: int
+    leased: int
+    running: int
+    failed_24h: int = Field(alias="failed24h")
+
+
+class CollectionQueueDepthsPublic(BaseModel):
+    available: bool
+    collector: int | None
+    default: int | None
+    analysis: int | None
+    notifications: int | None
+
+
+class CollectionSchemaSignalPublic(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider: str
+    endpoint: str
+    schema_fingerprint: str = Field(alias="schemaFingerprint")
+    top_level_fields: list[str] = Field(alias="topLevelFields")
+    first_seen_at: datetime = Field(alias="firstSeenAt")
+    last_seen_at: datetime = Field(alias="lastSeenAt")
+    occurrence_count: int = Field(alias="occurrenceCount")
+    state: Literal["new", "current", "historical"]
+
+
+class CollectionOperationsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    meta: ResponseMeta
+    runs: CollectionRunCountsPublic
+    queues: CollectionQueueDepthsPublic
+    schemas: list[CollectionSchemaSignalPublic]
 
 
 class DashboardStatsPublic(BaseModel):

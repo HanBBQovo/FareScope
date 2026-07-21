@@ -55,12 +55,10 @@ def test_price_endpoints_expose_bounded_owner_route_contracts() -> None:
     assert "cursor" in history_params and "cursor" in calendar_params
 
     fare_params = {
-        item["name"]: item
-        for item in schema["paths"]["/api/fares/search"]["get"]["parameters"]
+        item["name"]: item for item in schema["paths"]["/api/fares/search"]["get"]["parameters"]
     }
     runs_params = {
-        item["name"]: item
-        for item in schema["paths"]["/api/collection/runs"]["get"]["parameters"]
+        item["name"]: item for item in schema["paths"]["/api/collection/runs"]["get"]["parameters"]
     }
     assert fare_params["limit"]["schema"]["maximum"] == 100
     assert "cursor" in fare_params and "cursor" in runs_params
@@ -68,13 +66,18 @@ def test_price_endpoints_expose_bounded_owner_route_contracts() -> None:
     run_fields = schema["components"]["schemas"]["CollectionRunPublic"]["properties"]
     assert {
         "calendarObservations",
+        "diagnostics",
         "itineraries",
         "offers",
         "attempt",
         "maxAttempts",
+        "schemaFingerprint",
         "upstreamStatus",
         "warningCode",
     }.issubset(run_fields)
+
+    operations = schema["paths"]["/api/collection/operations"]["get"]
+    assert operations["responses"]["200"]["content"]["application/json"]["schema"]
 
 
 def test_fare_search_exposes_verified_local_filter_contract() -> None:
@@ -166,11 +169,7 @@ def test_filter_sql_is_applied_before_the_bounded_offer_limit() -> None:
             departure_minute_end=720,
         )
     )
-    statement = (
-        select(Itinerary.id)
-        .where(*itinerary_filter_conditions(filters))
-        .limit(100)
-    )
+    statement = select(Itinerary.id).where(*itinerary_filter_conditions(filters)).limit(100)
     sql = str(
         statement.compile(
             dialect=postgresql.dialect(),

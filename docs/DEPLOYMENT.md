@@ -88,6 +88,35 @@ blocked by a data-center egress policy even when the web/API stack is healthy.
 Treat provider response success, schema drift, and anti-bot failures as separate
 operational signals.
 
+Production collectors coordinate provider concurrency, route concurrency, and
+minimum start intervals through Redis. Every process and host that shares a
+provider traffic budget must use the same Redis database, coordination key
+prefix, and limit values. Redis/Lua failure is deliberately fail-closed: the
+collector cancels the active browser work and returns the database run to its
+bounded retry schedule rather than falling back to independent process-local
+limits. See `deploy/collector/CHROME_RUNTIME.md` for the exact controls and ACL
+requirements.
+
+## Observation retention
+
+The hourly partition-maintenance task creates current and near-future price
+partitions and applies a bounded two-stage lifecycle under a PostgreSQL advisory
+lock. The production defaults are:
+
+```dotenv
+FARESCOPE_COLLECTION_PARTITION_ARCHIVE_AFTER_MONTHS=24
+FARESCOPE_COLLECTION_PARTITION_PURGE_AFTER_MONTHS=
+FARESCOPE_COLLECTION_PARTITION_MAX_ACTIONS=2
+```
+
+Archiving detaches an old monthly partition from its hot parent and moves the
+table into `farescope_archive`; it does not delete the observations. Archived
+tables are currently outside normal history API queries and must be restored or
+queried operationally when old data is needed. Permanent purge is disabled by
+default. Enabling it requires a purge horizon longer than the archive horizon,
+and the task only drops tables that have already completed the archive stage.
+Keep purge disabled until database backups and a restore drill are proven.
+
 ## Security and backups
 
 - API, worker, scheduler, collector, web, and PgBouncer run read-only with a
@@ -100,6 +129,8 @@ operational signals.
 - Back up PostgreSQL with a tested restore procedure. Redis is a broker/cache
   durability aid, not the source of truth. Collector artifacts are diagnostic
   and should have shorter retention than fare observations.
+- Include both `public` and `farescope_archive` schemas in PostgreSQL backups;
+  archived observations are intentionally preserved outside the hot parents.
 - Monitor `docker compose ps`, API liveness, Celery worker heartbeats, queue
   depth, PgBouncer pool wait, PostgreSQL slow/blocked queries, disk usage, and
   collector response-shape failures.
@@ -112,5 +143,7 @@ liveness endpoint. Celery imports `app.tasks.celery_app:celery_app`.
 
 The compose file is intentionally not a Kubernetes manifest and does not enable
 automatic horizontal scaling. Scale API replicas behind the reverse proxy only
-after setting an explicit per-instance pool budget; keep scheduler singleton and
-collector concurrency bounded to respect provider rate limits.
+after setting an explicit per-instance pool budget; keep the scheduler singleton.
+Additional collectors require the same Redis coordination namespace and provider
+limits, and should only be added after target-host egress and provider behavior
+have been measured.

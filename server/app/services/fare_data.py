@@ -5,7 +5,27 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import exists, extract, func, literal, select, tuple_, union_all
+from sqlalchemy import (
+    Boolean,
+    Integer,
+    String,
+    Uuid,
+    and_,
+    any_,
+    cast,
+    column,
+    exists,
+    extract,
+    func,
+    lateral,
+    or_,
+    select,
+    true,
+    tuple_,
+    union_all,
+    values,
+)
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
@@ -151,6 +171,186 @@ class DashboardPriceAnalytics:
     price_change_percent: float | None
 
 
+def _fare_filter_values(
+    rows: list[tuple[object, ...]],
+    *,
+    name: str,
+):
+    return (
+        values(
+            column("branch_number", Integer),
+            column("query_id", Uuid),
+            column("currency", String(3)),
+            column("direct_only", Boolean),
+            column("airline_codes", ARRAY(String(8))),
+            column("departure_airports", ARRAY(String(8))),
+            column("arrival_airports", ARRAY(String(8))),
+            column("max_price_minor", Integer),
+            column("max_stops", Integer),
+            column("max_duration_minutes", Integer),
+            column("departure_minute_start", Integer),
+            column("departure_minute_end", Integer),
+            column("requires_itinerary_scan", Boolean),
+            name=name,
+        )
+        .data(rows)
+        .cte(name)
+    )
+
+
+def _fare_filter_row(
+    branch_number: int,
+    query_id: UUID,
+    currency: str,
+    filters: FareFilterSpec,
+) -> tuple[object, ...]:
+    return (
+        branch_number,
+        query_id,
+        currency,
+        filters.direct_only,
+        filters.airline_codes,
+        filters.departure_airports,
+        filters.arrival_airports,
+        filters.max_price_minor,
+        filters.max_stops,
+        filters.max_duration_minutes,
+        filters.departure_minute_start,
+        filters.departure_minute_end,
+        filters.requires_itinerary_scan,
+    )
+
+
+def _set_based_itinerary_filter_conditions(filter_rows) -> tuple[ColumnElement[bool], ...]:
+    max_stops = cast(filter_rows.c.max_stops, Integer)
+    max_duration_minutes = cast(filter_rows.c.max_duration_minutes, Integer)
+    departure_minute_start = cast(filter_rows.c.departure_minute_start, Integer)
+    departure_minute_end = cast(filter_rows.c.departure_minute_end, Integer)
+    airline_segment = aliased(Segment)
+    airline_match = exists(
+        select(1).where(
+            airline_segment.itinerary_id == Itinerary.id,
+            airline_segment.marketing_airline_code == any_(filter_rows.c.airline_codes),
+        )
+    ).correlate(Itinerary, filter_rows)
+
+    first_segment = aliased(Segment)
+    departure_minute = (
+        extract("hour", first_segment.departure_local) * 60
+        + extract("minute", first_segment.departure_local)
+    )
+    first_match = exists(
+        select(1).where(
+            first_segment.itinerary_id == Itinerary.id,
+            first_segment.leg_position == 0,
+            first_segment.position == 0,
+            or_(
+                func.cardinality(filter_rows.c.departure_airports) == 0,
+                first_segment.origin_airport_code == any_(filter_rows.c.departure_airports),
+            ),
+            or_(
+                departure_minute_start.is_(None),
+                departure_minute_end.is_(None),
+                and_(
+                    departure_minute >= departure_minute_start,
+                    departure_minute < departure_minute_end,
+                ),
+            ),
+        )
+    ).correlate(Itinerary, filter_rows)
+    needs_first_match = or_(
+        func.cardinality(filter_rows.c.departure_airports) > 0,
+        departure_minute_start.is_not(None),
+    )
+
+    arrival_segment = aliased(Segment)
+    later_segment = aliased(Segment)
+    has_later_segment = exists(
+        select(1).where(
+            later_segment.itinerary_id == arrival_segment.itinerary_id,
+            later_segment.leg_position == 0,
+            later_segment.position > arrival_segment.position,
+        )
+    ).correlate(arrival_segment)
+    arrival_match = exists(
+        select(1).where(
+            arrival_segment.itinerary_id == Itinerary.id,
+            arrival_segment.leg_position == 0,
+            arrival_segment.destination_airport_code
+            == any_(filter_rows.c.arrival_airports),
+            ~has_later_segment,
+        )
+    ).correlate(Itinerary, filter_rows)
+
+    return (
+        or_(filter_rows.c.direct_only.is_(False), Itinerary.is_direct.is_(True)),
+        or_(
+            max_stops.is_(None),
+            Itinerary.stop_count <= max_stops,
+        ),
+        or_(
+            max_duration_minutes.is_(None),
+            Itinerary.total_duration_minutes <= max_duration_minutes,
+        ),
+        or_(func.cardinality(filter_rows.c.airline_codes) == 0, airline_match),
+        or_(~needs_first_match, first_match),
+        or_(func.cardinality(filter_rows.c.arrival_airports) == 0, arrival_match),
+    )
+
+
+def _dashboard_run_minima_statement(
+    filter_rows,
+    *,
+    since: datetime,
+    as_of: datetime,
+    requires_itinerary_scan: bool,
+):
+    max_price_minor = cast(filter_rows.c.max_price_minor, Integer)
+    conditions: list[ColumnElement[bool]] = [
+        PriceObservation.search_query_id == filter_rows.c.query_id,
+        PriceObservation.currency == filter_rows.c.currency,
+        PriceObservation.observed_at >= since,
+        PriceObservation.observed_at <= as_of,
+        or_(
+            filter_rows.c.direct_only.is_(False),
+            PriceObservation.is_direct.is_(True),
+        ),
+        or_(
+            max_price_minor.is_(None),
+            PriceObservation.total_price_minor <= max_price_minor,
+        ),
+    ]
+    statement = select(
+        PriceObservation.collection_run_id.label("run_id"),
+        PriceObservation.observed_at.label("observed_at"),
+        func.min(PriceObservation.total_price_minor).label("price_minor"),
+    )
+    if requires_itinerary_scan:
+        statement = statement.join(
+            Itinerary,
+            Itinerary.id == PriceObservation.itinerary_id,
+        )
+        conditions.extend(
+            (
+                Itinerary.search_query_id == filter_rows.c.query_id,
+                *_set_based_itinerary_filter_conditions(filter_rows),
+            )
+        )
+    else:
+        conditions.append(PriceObservation.is_lowest.is_(True))
+    run_minima = lateral(
+        statement.where(*conditions).group_by(
+            PriceObservation.collection_run_id,
+            PriceObservation.observed_at,
+        )
+    ).alias("dashboard_run_minima")
+    return select(
+        filter_rows.c.branch_number,
+        run_minima.c.observed_at,
+        run_minima.c.price_minor,
+    ).select_from(filter_rows.join(run_minima, true()))
+
+
 async def load_subscription_fare_context(
     session: AsyncSession,
     *,
@@ -293,7 +493,6 @@ async def load_dashboard_price_analytics(
     if as_of.tzinfo is None:
         raise ValueError("dashboard trend snapshot must include a timezone")
 
-    since = as_of - timedelta(days=days)
     grouped_contexts: dict[tuple[UUID, FareFilterSpec], SubscriptionFareContext] = {}
     for context in contexts:
         if not context.subscription.enabled or context.search_query.currency != currency:
@@ -304,29 +503,56 @@ async def load_dashboard_price_analytics(
         )
         grouped_contexts.setdefault(key, context)
 
-    branches = []
-    for branch_number, context in enumerate(grouped_contexts.values()):
-        run_minima = _history_run_minima(
-            search_query=context.search_query,
-            filters=FareFilterSpec.from_subscription(
-                context.search_query,
-                context.filters,
-            ),
-            since=since,
-            as_of=as_of,
-            cte_name=f"dashboard_run_minima_{branch_number}",
-        )
-        branches.append(
-            select(
-                run_minima.c.observed_at.label("observed_at"),
-                run_minima.c.price_minor.label("price_minor"),
-            )
-        )
-
-    if not branches:
+    if not grouped_contexts:
         return DashboardPriceAnalytics(trend=(), price_change_percent=None)
 
-    observation_statement = branches[0] if len(branches) == 1 else union_all(*branches)
+    filter_entries = [
+        (
+            branch_number,
+            context,
+            filters,
+        )
+        for branch_number, ((_, filters), context) in enumerate(grouped_contexts.items())
+    ]
+    since = as_of - timedelta(days=days)
+    observation_statements = []
+    for requires_itinerary_scan in (False, True):
+        matching_entries = [
+            entry
+            for entry in filter_entries
+            if entry[2].requires_itinerary_scan is requires_itinerary_scan
+        ]
+        if not matching_entries:
+            continue
+        filter_rows = _fare_filter_values(
+            [
+                _fare_filter_row(
+                    branch_number,
+                    context.search_query.id,
+                    context.search_query.currency,
+                    filters,
+                )
+                for branch_number, context, filters in matching_entries
+            ],
+            name=(
+                "dashboard_scan_filters"
+                if requires_itinerary_scan
+                else "dashboard_simple_filters"
+            ),
+        )
+        observation_statements.append(
+            _dashboard_run_minima_statement(
+                filter_rows,
+                since=since,
+                as_of=as_of,
+                requires_itinerary_scan=requires_itinerary_scan,
+            )
+        )
+    observation_statement = (
+        observation_statements[0]
+        if len(observation_statements) == 1
+        else union_all(*observation_statements)
+    )
     observations = observation_statement.cte("dashboard_price_observations")
     bucket = func.date_trunc(
         "day",
@@ -398,90 +624,81 @@ async def load_subscription_latest_fares(
     if not contexts:
         return {}
 
-    query_ids = {context.search_query.id for context in contexts}
-    latest_runs = (
-        await session.scalars(
-            select(CollectionRun)
-            .where(
-                CollectionRun.search_query_id.in_(query_ids),
-                CollectionRun.status == CollectionStatus.SUCCEEDED.value,
-                CollectionRun.finished_at.is_not(None),
-            )
-            .distinct(CollectionRun.search_query_id)
-            .order_by(
-                CollectionRun.search_query_id,
-                CollectionRun.finished_at.desc(),
-                CollectionRun.id.desc(),
-            )
-        )
-    ).all()
-    run_by_query = {run.search_query_id: run for run in latest_runs}
-
-    grouped: dict[
-        tuple[UUID, UUID, str, FareFilterSpec],
-        list[UUID],
-    ] = {}
+    grouped: dict[tuple[UUID, str, FareFilterSpec], list[UUID]] = {}
     for context in contexts:
-        run = run_by_query.get(context.search_query.id)
-        if run is None:
-            continue
         key = (
-            run.id,
             context.search_query.id,
             context.search_query.currency,
             FareFilterSpec.from_subscription(context.search_query, context.filters),
         )
         grouped.setdefault(key, []).append(context.subscription.id)
 
-    branches = []
-    branch_keys: list[tuple[UUID, UUID, str, FareFilterSpec]] = []
-    for branch_number, key in enumerate(grouped):
-        run_id, query_id, currency, filters = key
-        conditions = list(itinerary_filter_conditions(filters))
-        if filters.max_price_minor is not None:
-            conditions.append(FareOffer.total_price_minor <= filters.max_price_minor)
-        limited = (
-            select(
-                FareOffer.total_price_minor.label("total_price_minor"),
-                FareOffer.currency.label("currency"),
-            )
-            .join(Itinerary, Itinerary.id == FareOffer.itinerary_id)
-            .where(
-                FareOffer.collection_run_id == run_id,
-                FareOffer.currency == currency,
-                Itinerary.search_query_id == query_id,
-                *conditions,
-            )
-            .order_by(FareOffer.total_price_minor, FareOffer.id)
-            .limit(1)
-            .subquery()
+    branch_keys = list(grouped)
+    filter_rows = _fare_filter_values(
+        [
+            _fare_filter_row(branch_number, query_id, currency, filters)
+            for branch_number, (query_id, currency, filters) in enumerate(branch_keys)
+        ],
+        name="latest_fare_filters",
+    )
+    latest_run = lateral(
+        select(
+            CollectionRun.id.label("run_id"),
+            CollectionRun.finished_at.label("finished_at"),
         )
-        branches.append(
+        .where(
+            CollectionRun.search_query_id == filter_rows.c.query_id,
+            CollectionRun.status == CollectionStatus.SUCCEEDED.value,
+            CollectionRun.finished_at.is_not(None),
+        )
+        .order_by(CollectionRun.finished_at.desc(), CollectionRun.id.desc())
+        .limit(1)
+    ).alias("latest_successful_run")
+    best_offer = lateral(
+        select(
+            FareOffer.total_price_minor.label("total_price_minor"),
+            FareOffer.currency.label("currency"),
+        )
+        .join(Itinerary, Itinerary.id == FareOffer.itinerary_id)
+        .where(
+            FareOffer.collection_run_id == latest_run.c.run_id,
+            FareOffer.currency == filter_rows.c.currency,
+            Itinerary.search_query_id == filter_rows.c.query_id,
+            or_(
+                cast(filter_rows.c.max_price_minor, Integer).is_(None),
+                FareOffer.total_price_minor
+                <= cast(filter_rows.c.max_price_minor, Integer),
+            ),
+            *_set_based_itinerary_filter_conditions(filter_rows),
+        )
+        .order_by(FareOffer.total_price_minor, FareOffer.id)
+        .limit(1)
+    ).alias("best_filtered_offer")
+    rows = (
+        await session.execute(
             select(
-                literal(branch_number).label("branch_number"),
-                limited.c.total_price_minor,
-                limited.c.currency,
+                filter_rows.c.branch_number,
+                latest_run.c.run_id,
+                latest_run.c.finished_at,
+                best_offer.c.total_price_minor,
+                best_offer.c.currency,
+            ).select_from(
+                filter_rows.join(latest_run, true()).join(best_offer, true())
             )
         )
-        branch_keys.append(key)
-
-    if not branches:
-        return {}
-    statement = branches[0] if len(branches) == 1 else union_all(*branches)
-    rows = (await session.execute(statement)).all()
+    ).all()
     result: dict[UUID, SubscriptionLatestFare] = {}
     for row in rows:
         key = branch_keys[row.branch_number]
-        run = run_by_query[key[1]]
-        if run.finished_at is None:
+        if row.finished_at is None:
             continue
         for subscription_id in grouped[key]:
             result[subscription_id] = SubscriptionLatestFare(
                 subscription_id=subscription_id,
-                collection_run_id=run.id,
+                collection_run_id=row.run_id,
                 total_price_minor=row.total_price_minor,
                 currency=row.currency,
-                observed_at=run.finished_at,
+                observed_at=row.finished_at,
             )
     return result
 

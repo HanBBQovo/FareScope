@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import ipaddress
+from datetime import time
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.notification_schedule import (
+    NotificationScheduleError,
+    validate_notification_schedule,
+)
 from app.models import AuditEvent, NotificationChannel, User
 from app.security import SecretBox
 
@@ -46,7 +51,20 @@ async def create_notification_channel(
     label: str,
     destination: str,
     secret_box: SecretBox,
+    timezone: str | None = None,
+    quiet_hours_start: time | None = None,
+    quiet_hours_end: time | None = None,
+    allowed_weekdays: list[int] | None = None,
 ) -> NotificationChannel:
+    try:
+        normalized_timezone, normalized_weekdays = validate_notification_schedule(
+            timezone_name=timezone,
+            quiet_hours_start=quiet_hours_start,
+            quiet_hours_end=quiet_hours_end,
+            allowed_weekdays=allowed_weekdays,
+        )
+    except NotificationScheduleError as error:
+        raise NotificationChannelError(str(error)) from error
     normalized_label = label.strip()
     existing = await session.scalar(
         select(NotificationChannel.id).where(
@@ -68,6 +86,12 @@ async def create_notification_channel(
             {"destination": normalized_destination}
         ),
         config_redacted={"destination_masked": masked_destination},
+        timezone=normalized_timezone,
+        quiet_hours_start=quiet_hours_start,
+        quiet_hours_end=quiet_hours_end,
+        allowed_weekdays=(
+            list(normalized_weekdays) if normalized_weekdays is not None else None
+        ),
     )
     session.add(channel)
     await session.flush()
@@ -84,12 +108,12 @@ async def create_notification_channel(
     return channel
 
 
-async def set_notification_channel_enabled(
+async def update_notification_channel(
     session: AsyncSession,
     *,
     user: User,
     channel_id: UUID,
-    enabled: bool,
+    updates: dict[str, object],
 ) -> NotificationChannel:
     channel = await session.scalar(
         select(NotificationChannel)
@@ -98,22 +122,66 @@ async def set_notification_channel_enabled(
     )
     if channel is None:
         raise NotificationChannelNotFoundError
-    channel.enabled = enabled
+    if not updates:
+        raise NotificationChannelError("at least one notification channel field is required")
+
+    timezone = updates.get("timezone", channel.timezone)
+    quiet_hours_start = updates.get("quiet_hours_start", channel.quiet_hours_start)
+    quiet_hours_end = updates.get("quiet_hours_end", channel.quiet_hours_end)
+    allowed_weekdays = updates.get("allowed_weekdays", channel.allowed_weekdays)
+    if timezone is not None and not isinstance(timezone, str):
+        raise NotificationChannelError("timezone is invalid")
+    if quiet_hours_start is not None and not isinstance(quiet_hours_start, time):
+        raise NotificationChannelError("quiet hours start is invalid")
+    if quiet_hours_end is not None and not isinstance(quiet_hours_end, time):
+        raise NotificationChannelError("quiet hours end is invalid")
+    if allowed_weekdays is not None and not isinstance(allowed_weekdays, (list, tuple)):
+        raise NotificationChannelError("allowed weekdays are invalid")
+    try:
+        normalized_timezone, normalized_weekdays = validate_notification_schedule(
+            timezone_name=timezone,
+            quiet_hours_start=quiet_hours_start,
+            quiet_hours_end=quiet_hours_end,
+            allowed_weekdays=allowed_weekdays,
+        )
+    except (NotificationScheduleError, TypeError) as error:
+        raise NotificationChannelError(str(error)) from error
+
+    if "enabled" in updates:
+        channel.enabled = bool(updates["enabled"])
+    channel.timezone = normalized_timezone
+    channel.quiet_hours_start = quiet_hours_start
+    channel.quiet_hours_end = quiet_hours_end
+    channel.allowed_weekdays = (
+        list(normalized_weekdays) if normalized_weekdays is not None else None
+    )
     session.add(
         AuditEvent(
             actor_user_id=user.id,
-            action=(
-                "notification_channel.enabled"
-                if enabled
-                else "notification_channel.disabled"
-            ),
+            action="notification_channel.updated",
             target_type="notification_channel",
             target_id=str(channel.id),
+            metadata_json={"fields": sorted(updates)},
             summary="Notification channel state changed",
         )
     )
     await session.flush()
     return channel
+
+
+async def set_notification_channel_enabled(
+    session: AsyncSession,
+    *,
+    user: User,
+    channel_id: UUID,
+    enabled: bool,
+) -> NotificationChannel:
+    return await update_notification_channel(
+        session,
+        user=user,
+        channel_id=channel_id,
+        updates={"enabled": enabled},
+    )
 
 
 def mask_destination(channel_type: str, destination: str) -> str:

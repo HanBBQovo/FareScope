@@ -6,10 +6,12 @@ from app.db.partitions import (
     calendar_price_observation_partition_ddl,
     calendar_price_observation_partition_name,
     iter_month_starts,
+    partition_month_from_name,
     price_observation_partition_ddl,
     price_observation_partition_name,
     shift_month,
 )
+from app.settings import Settings
 
 
 def test_partition_window_crosses_year_boundaries() -> None:
@@ -53,3 +55,37 @@ def test_calendar_partition_ddl_is_deterministic() -> None:
 def test_negative_partition_windows_are_rejected() -> None:
     with pytest.raises(ValueError, match="cannot be negative"):
         tuple(iter_month_starts(date(2026, 7, 1), months_before=-1))
+
+
+def test_partition_names_are_strictly_parsed() -> None:
+    assert partition_month_from_name("price_observations_y2024m12") == date(2024, 12, 1)
+    assert partition_month_from_name("calendar_price_observations_y2025m01") == date(2025, 1, 1)
+    with pytest.raises(ValueError, match="unrecognized"):
+        partition_month_from_name("price_observations_y2024m13")
+    with pytest.raises(ValueError, match="unrecognized"):
+        partition_month_from_name("untrusted_table_y2024m12")
+
+
+def test_partition_retention_is_non_destructive_by_default() -> None:
+    settings = Settings()
+
+    assert settings.collection_partition_archive_after_months == 24
+    assert settings.collection_partition_purge_after_months is None
+    assert (
+        Settings(collection_partition_purge_after_months="").collection_partition_purge_after_months
+        is None
+    )
+    assert (
+        Settings(
+            collection_partition_archive_after_months="off"
+        ).collection_partition_archive_after_months
+        is None
+    )
+
+    with pytest.raises(ValueError, match="must exceed"):
+        Settings(collection_partition_purge_after_months=12)
+    with pytest.raises(ValueError, match="requires archiving"):
+        Settings(
+            collection_partition_archive_after_months=None,
+            collection_partition_purge_after_months=84,
+        )

@@ -33,9 +33,14 @@ from app.api.pagination import (
 from app.api.schemas.fares import (
     CalendarPricePointPublic,
     CalendarPriceResponse,
+    CollectionDiagnosticPublic,
     CollectionHealthPublic,
+    CollectionOperationsResponse,
+    CollectionQueueDepthsPublic,
+    CollectionRunCountsPublic,
     CollectionRunListResponse,
     CollectionRunPublic,
+    CollectionSchemaSignalPublic,
     CollectionStatePublic,
     DashboardOverviewResponse,
     DashboardStatsPublic,
@@ -70,6 +75,7 @@ from app.models import (
 from app.models.enums import CollectionStatus
 from app.repositories.canonical_searches import get_or_create_canonical_search
 from app.services.collection_dispatch import dispatch_collection_run_safely
+from app.services.collection_operations import load_collection_operations
 from app.services.collection_runs import ensure_on_demand_collection_run
 from app.services.fare_data import (
     FareFilterSpec,
@@ -595,6 +601,8 @@ async def collection_runs(
                 maxAttempts=run.max_attempts,
                 upstreamStatus=run.upstream_status,
                 warningCode=_run_warning_code(run),
+                schemaFingerprint=run.schema_fingerprint,
+                diagnostics=_run_diagnostics(run),
                 durationMs=_duration_ms(run),
                 errorCode=run.error_code,
             )
@@ -607,6 +615,49 @@ async def collection_runs(
         ),
         hasMore=has_more,
         nextCursor=next_cursor,
+    )
+
+
+@router.get("/collection/operations", response_model=CollectionOperationsResponse)
+async def collection_operations(
+    identity: IdentityDependency,
+    database: DatabaseSession,
+    settings: SettingsDependency,
+) -> CollectionOperationsResponse:
+    snapshot = await load_collection_operations(
+        database,
+        user_id=identity.user.id,
+        redis_url=settings.redis_url,
+    )
+    return CollectionOperationsResponse(
+        meta=ResponseMeta(generatedAt=snapshot.generated_at),
+        runs=CollectionRunCountsPublic(
+            ready=snapshot.run_counts.ready,
+            retrying=snapshot.run_counts.retrying,
+            leased=snapshot.run_counts.leased,
+            running=snapshot.run_counts.running,
+            failed24h=snapshot.run_counts.failed_24h,
+        ),
+        queues=CollectionQueueDepthsPublic(
+            available=snapshot.queue_depths.available,
+            collector=snapshot.queue_depths.collector,
+            default=snapshot.queue_depths.default,
+            analysis=snapshot.queue_depths.analysis,
+            notifications=snapshot.queue_depths.notifications,
+        ),
+        schemas=[
+            CollectionSchemaSignalPublic(
+                provider=item.provider,
+                endpoint=item.endpoint,
+                schemaFingerprint=item.schema_fingerprint,
+                topLevelFields=list(item.top_level_fields),
+                firstSeenAt=item.first_seen_at,
+                lastSeenAt=item.last_seen_at,
+                occurrenceCount=item.occurrence_count,
+                state=item.state,
+            )
+            for item in snapshot.schema_signals
+        ],
     )
 
 
@@ -625,26 +676,36 @@ async def dashboard_overview(
     ).all()
     query_ids = {subscription.search_query_id for subscription in subscriptions}
     queries = (
-        await database.scalars(select(SearchQuery).where(SearchQuery.id.in_(query_ids)))
-    ).all() if query_ids else []
+        (await database.scalars(select(SearchQuery).where(SearchQuery.id.in_(query_ids)))).all()
+        if query_ids
+        else []
+    )
     query_map = {query.id: query for query in queries}
     filters = (
-        await database.scalars(
-            select(SubscriptionFilter).where(
-                SubscriptionFilter.subscription_id.in_(
-                    {subscription.id for subscription in subscriptions}
+        (
+            await database.scalars(
+                select(SubscriptionFilter).where(
+                    SubscriptionFilter.subscription_id.in_(
+                        {subscription.id for subscription in subscriptions}
+                    )
                 )
             )
-        )
-    ).all() if subscriptions else []
+        ).all()
+        if subscriptions
+        else []
+    )
     filter_by_subscription = {item.subscription_id: item for item in filters}
     search_legs = (
-        await database.scalars(
-            select(SearchLegRow)
-            .where(SearchLegRow.search_query_id.in_(query_ids))
-            .order_by(SearchLegRow.search_query_id, SearchLegRow.position)
-        )
-    ).all() if query_ids else []
+        (
+            await database.scalars(
+                select(SearchLegRow)
+                .where(SearchLegRow.search_query_id.in_(query_ids))
+                .order_by(SearchLegRow.search_query_id, SearchLegRow.position)
+            )
+        ).all()
+        if query_ids
+        else []
+    )
     legs_by_query: dict[UUID, list[SearchLegRow]] = defaultdict(list)
     for search_leg in search_legs:
         legs_by_query[search_leg.search_query_id].append(search_leg)
@@ -656,8 +717,7 @@ async def dashboard_overview(
             legs=tuple(legs_by_query.get(subscription.search_query_id, [])),
         )
         for subscription in subscriptions
-        if subscription.search_query_id in query_map
-        and subscription.id in filter_by_subscription
+        if subscription.search_query_id in query_map and subscription.id in filter_by_subscription
     )
     latest_fares = await load_subscription_latest_fares(database, contexts=contexts)
     generated_at = datetime.now(UTC)
@@ -764,12 +824,16 @@ async def _load_offers(
     rows = rows[:limit]
     itinerary_ids = {itinerary.id for _, itinerary in rows}
     segment_rows = (
-        await database.scalars(
-            select(Segment)
-            .where(Segment.itinerary_id.in_(itinerary_ids))
-            .order_by(Segment.itinerary_id, Segment.position)
-        )
-    ).all() if itinerary_ids else []
+        (
+            await database.scalars(
+                select(Segment)
+                .where(Segment.itinerary_id.in_(itinerary_ids))
+                .order_by(Segment.itinerary_id, Segment.position)
+            )
+        ).all()
+        if itinerary_ids
+        else []
+    )
     segments_by_itinerary: dict[UUID, list[Segment]] = defaultdict(list)
     for segment in segment_rows:
         segments_by_itinerary[segment.itinerary_id].append(segment)
@@ -902,6 +966,63 @@ def _run_warning_code(run: CollectionRun) -> str | None:
     partial = (run.run_metadata or {}).get("partial_data")
     if run.upstream_status == "success_with_warnings" and isinstance(partial, dict):
         return "partial_fare_data"
+    return None
+
+
+def _run_diagnostics(run: CollectionRun) -> list[CollectionDiagnosticPublic]:
+    metadata = run.run_metadata or {}
+    candidates: list[tuple[object, Literal["warning", "error"]]] = []
+    diagnostics = metadata.get("diagnostics")
+    if isinstance(diagnostics, list):
+        candidates.extend((item, "warning") for item in diagnostics)
+    failure = metadata.get("failure")
+    if isinstance(failure, dict) and isinstance(failure.get("diagnostics"), list):
+        candidates.extend((item, "error") for item in failure["diagnostics"])
+
+    result: list[CollectionDiagnosticPublic] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for value, default_severity in reversed(candidates):
+        if not isinstance(value, dict):
+            continue
+        code = str(value.get("code") or value.get("kind") or "diagnostic")[:120]
+        message = str(value.get("message") or code)[:500]
+        path_value = value.get("path")
+        path = str(path_value)[:240] if path_value is not None else None
+        key = (code, message, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        severity = "error" if value.get("severity") == "error" else default_severity
+        retryable_value = value.get("retryable")
+        retryable = _optional_bool(retryable_value)
+        observed_type_value = value.get("observed_type")
+        result.append(
+            CollectionDiagnosticPublic(
+                code=code,
+                message=message,
+                severity=severity,
+                path=path,
+                observedType=(
+                    str(observed_type_value)[:120] if observed_type_value is not None else None
+                ),
+                retryable=retryable,
+            )
+        )
+        if len(result) >= 20:
+            break
+    result.reverse()
+    return result
+
+
+def _optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.casefold()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
     return None
 
 

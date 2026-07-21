@@ -31,7 +31,7 @@ npm run build
 | `/subscriptions` | 用户订阅与阈值管理 |
 | `/history` | 持久化价格观测趋势 |
 | `/collection` | 采集任务、拦截与解析失败状态 |
-| `/notifications` | 告警规则、事件、投递记录以及 Webhook、PushPlus、Telegram、Bark 渠道 |
+| `/notifications` | 告警规则、事件、投递记录以及支持 IANA 时区、安静时段和允许星期的通知渠道 |
 
 页面采用 `lazy()` 分包，`Dashboard.tsx` 只负责产品外壳与导航，具体页面放在 `src/pages/`。
 

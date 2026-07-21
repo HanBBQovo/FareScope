@@ -15,9 +15,20 @@ from app.collectors.runtime.models import (
 )
 from app.collectors.runtime.policy import (
     CollectionExecutor,
+    CollectionRateGate,
     ProviderRouteGate,
     RateLimitPolicy,
     RetryPolicy,
+)
+from app.collectors.runtime.redis_gate import (
+    CollectionCoordinationError,
+    CollectionCoordinationLeaseLostError,
+    CollectionCoordinationTimeoutError,
+    CollectionCoordinationUnavailableError,
+    RedisAcquireAttempt,
+    RedisCoordinationLease,
+    RedisLeaseCoordinator,
+    RedisProviderRouteGate,
 )
 
 __all__ = [
@@ -26,11 +37,20 @@ __all__ = [
     "CapturedPayload",
     "CaptureDiagnostic",
     "CaptureRule",
+    "CollectionCoordinationError",
+    "CollectionCoordinationLeaseLostError",
+    "CollectionCoordinationTimeoutError",
+    "CollectionCoordinationUnavailableError",
     "CollectionExecutor",
+    "CollectionRateGate",
     "FailureKind",
     "PlaywrightCaptureRunner",
     "ProviderRouteGate",
     "RateLimitPolicy",
+    "RedisAcquireAttempt",
+    "RedisCoordinationLease",
+    "RedisLeaseCoordinator",
+    "RedisProviderRouteGate",
     "ResponseCapture",
     "RetryPolicy",
     "ctrip_capture_rules",

@@ -252,6 +252,15 @@ export interface CalendarPriceOptions {
 
 export type CollectionRunStatus = 'success' | 'running' | 'failed' | 'blocked'
 
+export interface CollectionDiagnostic {
+  code: string
+  message: string
+  severity: 'warning' | 'error'
+  path: string | null
+  observedType: string | null
+  retryable: boolean | null
+}
+
 export interface CollectionRun {
   id: string
   queryLabel: string
@@ -267,6 +276,8 @@ export interface CollectionRun {
   maxAttempts: number
   upstreamStatus: string | null
   warningCode: string | null
+  schemaFingerprint: string | null
+  diagnostics: CollectionDiagnostic[]
   durationMs: number | null
   errorCode: string | null
 }
@@ -283,6 +294,34 @@ export interface CollectionRunList {
   nextCursor: string | null
 }
 
+export interface CollectionOperations {
+  meta: ResponseMeta
+  runs: {
+    ready: number
+    retrying: number
+    leased: number
+    running: number
+    failed24h: number
+  }
+  queues: {
+    available: boolean
+    collector: number | null
+    default: number | null
+    analysis: number | null
+    notifications: number | null
+  }
+  schemas: Array<{
+    provider: string
+    endpoint: string
+    schemaFingerprint: string
+    topLevelFields: string[]
+    firstSeenAt: string
+    lastSeenAt: string
+    occurrenceCount: number
+    state: 'new' | 'current' | 'historical'
+  }>
+}
+
 export type NotificationChannelType = 'email' | 'webhook' | 'telegram' | 'bark' | 'pushplus'
 
 export interface NotificationChannel {
@@ -291,6 +330,10 @@ export interface NotificationChannel {
   label: string
   destinationMasked: string
   enabled: boolean
+  timezone: string | null
+  quietHoursStart: string | null
+  quietHoursEnd: string | null
+  allowedWeekdays: number[] | null
   verifiedAt: string | null
 }
 
@@ -407,6 +450,7 @@ export const fareQueryKeys = {
     [...fareQueryKeys.all, 'calendar', routeId, options] as const
   ),
   collectionRuns: () => [...fareQueryKeys.all, 'collection-runs'] as const,
+  collectionOperations: () => [...fareQueryKeys.all, 'collection-operations'] as const,
   notificationChannels: () => [...fareQueryKeys.all, 'notification-channels'] as const,
   alertRules: (subscriptionId?: string) => [...fareQueryKeys.all, 'alert-rules', subscriptionId || 'all'] as const,
   alertEvents: () => [...fareQueryKeys.all, 'alert-events'] as const,
@@ -511,22 +555,39 @@ export async function getCollectionRuns(cursor?: string): Promise<CollectionRunL
   return apiRequest<CollectionRunList>(`/collection/runs?${queryString({ limit: 20, cursor })}`)
 }
 
+export async function getCollectionOperations(): Promise<CollectionOperations> {
+  return apiRequest<CollectionOperations>('/collection/operations')
+}
+
 export async function getNotificationChannels(): Promise<NotificationChannelList> {
   return apiRequest<NotificationChannelList>('/notifications/channels')
 }
 
-export async function createNotificationChannel(input: {
+export interface NotificationChannelScheduleInput {
+  timezone: string | null
+  quietHoursStart: string | null
+  quietHoursEnd: string | null
+  allowedWeekdays: number[] | null
+}
+
+export interface CreateNotificationChannelInput extends NotificationChannelScheduleInput {
   type: NotificationChannelType
   label: string
   destination: string
-}): Promise<NotificationChannel> {
+}
+
+export type UpdateNotificationChannelInput = Partial<NotificationChannelScheduleInput> & {
+  enabled?: boolean
+}
+
+export async function createNotificationChannel(input: CreateNotificationChannelInput): Promise<NotificationChannel> {
   return apiRequest<NotificationChannel>('/notifications/channels', {
     method: 'POST',
     body: JSON.stringify(input),
   })
 }
 
-export async function updateNotificationChannel(id: string, input: Partial<NotificationChannel>): Promise<NotificationChannel> {
+export async function updateNotificationChannel(id: string, input: UpdateNotificationChannelInput): Promise<NotificationChannel> {
   return apiRequest<NotificationChannel>(`/notifications/channels/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(input),

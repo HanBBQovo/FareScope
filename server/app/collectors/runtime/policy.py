@@ -8,11 +8,21 @@ import random
 import threading
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 ResultT = TypeVar("ResultT")
+
+
+class CollectionRateGate(Protocol):
+    """Common interface for local and distributed collection coordination."""
+
+    def slot(
+        self,
+        provider: str,
+        route_key: str,
+    ) -> AbstractAsyncContextManager[None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +139,7 @@ class CollectionExecutor:
 
     def __init__(
         self,
-        gate: ProviderRouteGate,
+        gate: CollectionRateGate,
         retry_policy: RetryPolicy,
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,

@@ -14,22 +14,25 @@ The core product runs locally end to end:
 - owner-scoped subscriptions and notification channels with shared canonical collection;
 - one-way/round-trip exploration, direct and local result filters, current detailed offers when the
   provider returns them, history, low-fare calendars, and round-trip matrices;
-- headed Google Chrome collection with leases, pacing, retries, partial-data handling, and schema
-  diagnostics;
-- alert rules, events, Webhook/Telegram/Bark/PushPlus delivery, retry, and delivery audit;
+- headed Google Chrome collection with database leases, Redis cross-process/host pacing, owner
+  fencing, retries, partial-data handling, and schema diagnostics;
+- alert rules, events, Webhook/Telegram/Bark/PushPlus delivery, retry, delivery audit, and
+  per-channel quiet-hour/weekday schedules;
 - async FastAPI, Celery process isolation, PostgreSQL partitions/snapshots, Redis, and production
   PgBouncer topology;
-- real dashboard aggregates, keyset pagination, readiness, request IDs, and a reproducible
-  PostgreSQL performance workload.
+- collection queue/run/schema operations views, bounded two-stage partition archive maintenance,
+  keyset pagination, readiness, request IDs, and reproducible PostgreSQL concurrency workloads.
 
 The latest live `SHA-TYO` round-trip run stored 1,130 latest calendar snapshots. Ctrip returned no
 detailed offers for that sample after three bounded attempts, so FareScope reports a visible
 `partial_fare_data` warning instead of fabricating a price. Detailed itinerary contracts are
 covered by redacted one-way/round-trip fixtures and have also been observed on another live route.
 
-Target-server egress, large concurrent/cold-cache testing, automated retention, exports, quiet
-hours, and history-dependent predictions remain open. The authoritative evidence and checklist are
-in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
+Reference concurrency is measured and the 100-route dashboard no longer times out at 32 concurrent
+API requests. A 1.44-million-observation run still exposed one service-layer pool timeout and raw
+trend growth, so the 14.4-million profile, true cold-cache testing, target-server egress, exports,
+archived-data access, and history-dependent predictions remain open. The authoritative evidence and
+checklist are in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
 
 ## Repository layout
 
@@ -111,6 +114,8 @@ uv run ruff check .
 uv run pytest -q
 FARESCOPE_TEST_DATABASE_URL=postgresql+asyncpg://farescope:farescope@127.0.0.1:5432/farescope \
   uv run pytest -q
+FARESCOPE_TEST_REDIS_URL=redis://127.0.0.1:6379/0 \
+  uv run pytest -q tests/collectors/runtime/test_redis_gate_integration.py
 uv run alembic check
 
 cd ../web

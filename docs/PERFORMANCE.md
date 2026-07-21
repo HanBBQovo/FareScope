@@ -19,8 +19,10 @@ Current status:
   indexes and bounded benchmark queries are covered by structure tests.
 - `verified`: API, scheduler, collector, analysis, and notification responsibilities are separated
   at the process boundary in the architecture contract.
+- `verified locally`: the repeatable reference concurrency workload, set-based 100-route dashboard
+  reads, and zero-error completion across all 1,120 reference service/API requests.
 - `needs scale verification`: latency SLOs, connection budgets, index-only behavior, cache hit
-  ratios, autovacuum settings, and the large profile query plans.
+  ratios, autovacuum settings, true cold-cache behavior, and the large profile query plans.
 - `history dependent`: long-range trend aggregation and retention-cost estimates.
 - `blocked`: production hardware sizing and a representative server network environment.
 
@@ -62,6 +64,76 @@ limit without replacing branch unions with a set-based read model or measured ca
 These results are `verified` for local execution, schema compatibility, keyset behavior, and the
 reference data shape. They are not production capacity evidence: the 14.4-million-row large profile,
 cold storage behavior, concurrent clients, and production hardware still need scale verification.
+
+### Local concurrent API proof and dashboard correction (2026-07-21)
+
+A repeatable two-layer benchmark was run against a newly created disposable database pinned to
+schema revision `20260720_0011`. The reference fixture contained 500 users, 6,088 subscriptions
+(including one exact 100-route dashboard user), 2,000 canonical searches, 7,000 collection runs,
+40,000 offers, 60,000 calendar prices, 200 provider schema observations, and 480,000 price
+observations. The database occupied 341 MB.
+
+The host was an Apple M5 MacBook Pro with 10 logical cores and 32 GB RAM. PostgreSQL 16.13 ARM64
+used `shared_buffers=128MB`, `work_mem=4MB`, `effective_cache_size=4GB`, and
+`max_connections=100`. Each layer used the configured API pool of 8 persistent plus 4 overflow
+connections with a 2-second timeout. Every scenario used 64 authenticated fixture identities, four
+warmups, and 80 measured requests. API measurements use the full FastAPI ASGI stack but exclude
+socket, TLS, Uvicorn, and reverse-proxy cost.
+
+The first reference run exposed a real capacity failure isolated to the 100-route dashboard. The
+service built 100 independent latest-fare UNION branches and 100 independent trend branches. At
+concurrency 32 this held all 12 connections long enough to produce QueuePool timeouts. The read was
+replaced with typed filter `VALUES` sets: latest successful runs and filtered offers use one
+set-based LATERAL statement, while trend observations use at most two LATERAL branches (simple and
+itinerary-filtered). No pool increase or response cache was used.
+
+| Layer / concurrency | Version | p50 | p95 | p99 | Throughput | Pool wait p95 | Errors |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Service / 16 | Before | 820 ms | 1,411 ms | 1,565 ms | 15.7 rps | 681 ms | 0/80 |
+| Service / 16 | Set-based | 699 ms | 1,438 ms | 1,811 ms | 20.2 rps | 799 ms | 0/80 |
+| Service / 32 | Before | 1,575 ms | 2,237 ms | 2,719 ms | 17.2 rps | 2,014 ms | 11/80 |
+| Service / 32 | Set-based | 1,211 ms | 1,634 ms | 2,118 ms | 24.1 rps | 1,057 ms | 0/80 |
+| ASGI API / 16 | Before | 1,111 ms | 1,387 ms | 1,475 ms | 13.9 rps | 344 ms | 0/80 |
+| ASGI API / 16 | Set-based | 606 ms | 812 ms | 862 ms | 24.9 rps | 221 ms | 0/80 |
+| ASGI API / 32 | Before | 1,579 ms | 2,691 ms | 2,919 ms | 15.5 rps | 1,368 ms | 4/80 |
+| ASGI API / 32 | Set-based | 1,162 ms | 1,655 ms | 2,475 ms | 23.4 rps | 784 ms | 0/80 |
+
+Concurrency timing is noisy on a shared laptop, so the acceptance signal is the repeated removal of
+pool timeouts plus the large API throughput/tail improvement, not a claim that every percentile is
+monotonic. A later all-workload c32 repeat also completed all 1,120 service/API requests without an
+error. Its non-dashboard API p95 values were 148 ms for fare search, 314 ms for history, 240 ms for
+calendar, 142 ms for subscriptions, 110 ms for collection runs, and 120 ms for collection
+operations. History/calendar include a single-context latest-fare read and remained below their
+documented 350 ms historical-page p95 target in this local ASGI setup.
+
+Three optimized warm plan runs showed:
+
+| 100-route operation | Application range | PostgreSQL execution | PostgreSQL planning |
+| --- | ---: | ---: | ---: |
+| Latest filtered fares | 31.9-39.1 ms | 0.685-0.793 ms | 1.750-2.098 ms |
+| Dashboard trend | 44.6-54.4 ms | 21.921-24.615 ms | 1.154-1.322 ms |
+| Collection run-status counts | 1.7-2.3 ms | 0.587-0.621 ms | 0.098-0.108 ms |
+| Provider schema signals | 2.1-2.2 ms | 0.285-0.302 ms | 0.283-0.304 ms |
+
+The directly comparable pre-change plan was 7.142 ms execution plus 8.029 ms planning for latest
+fares and 19.528 ms plus 9.664 ms for trend. The set-based trend trades a small execution increase
+for far lower construction/planning time and bounded statement shape. A PostgreSQL fixture test
+verifies batched results against singleton results across airline, airport, price, stop, duration,
+and departure-time filters.
+
+Client/pool-cold evidence after the change was 116 ms for the first dashboard call on a fresh
+engine versus 63 ms for the second call on the same pool. This is explicitly not PostgreSQL or OS
+cold-cache evidence: the shared PostgreSQL server was not restarted and host caches were not
+purged.
+
+An additional fresh database used 720 observations for each of the same 2,000 searches: 1.44
+million observations (3x reference), 861 MB, still revision `20260720_0011`. This is not the 14.4
+million large profile. At c32 the API completed 80/80 dashboard requests with p95 1,990 ms and p99
+2,365 ms, but the direct service layer had one 2-second pool timeout. Its dashboard trend alone
+executed in 125 ms and touched 122,476 shared buffers. This is the remaining growth boundary: the
+set-based change removes branch-planning collapse, but raw trend work still scales with observation
+volume. Before claiming large-profile readiness, move the dashboard trend to a maintained bounded
+aggregate/read model and rerun the 14.4-million-row profile on production-like dedicated hardware.
 
 ## Runtime isolation
 
@@ -113,8 +185,9 @@ Operational limits:
 - API transaction duration p95 target: below 200 ms; no transaction may include provider I/O.
 - Pool timeout: 2 seconds for API reads, 5 seconds for background workers.
 
-Connection-pool values must become explicit settings before production deployment; engine defaults
-are not the production configuration.
+Connection-pool size, overflow, timeout, recycle, and statement timeout are explicit application
+settings. Production values still require measurement on the target hardware; engine defaults are
+not a substitute for an intentional per-process budget.
 
 ## Query and pagination contract
 
@@ -159,25 +232,34 @@ amplification, buffer hits, and heap fetches first.
 
 ## Observation storage and partitions
 
-`price_observations` is partitioned monthly by `observed_at` in UTC. The maintenance job must:
+`price_observations` and `calendar_price_observations` are partitioned monthly by their UTC
+observation time. The maintenance job now:
 
-1. Create partitions at least three months ahead and keep the previous month available for late
+1. Creates current and near-future partitions and keeps the previous month available for late
    writes.
-2. Check daily that every timestamp in the scheduler horizon maps to a real partition.
-3. Run `ANALYZE` after a large backfill and monitor per-partition dead tuples.
-4. Detach an expired partition before archive/delete; never perform a massive unbounded delete from
-   the parent table.
-5. Keep unique constraints and query indexes attached to every child partition.
+2. Runs under a PostgreSQL transaction advisory lock so multiple schedulers cannot perform the
+   same lifecycle action concurrently.
+3. Keeps 24 months hot by default, then detaches older partitions and moves the complete tables to
+   `farescope_archive` without deleting their observations.
+4. Limits each execution to two lifecycle actions by default so maintenance remains bounded.
+5. Leaves permanent purge disabled; an operator must configure a purge horizon longer than the
+   archive horizon, and only already-archived tables are eligible.
 
-Initial retention proposal, still `needs scale verification`:
+The hot/archive horizon is implemented and PostgreSQL-tested, but archived tables are not yet read
+by the normal history APIs. Restore, explicit archive querying, or future background export is
+required to inspect those older rows. Database backups must include both `public` and
+`farescope_archive`.
 
-- Normalized raw observations: 13 complete months online.
-- Daily price aggregates: 36 months online.
+Retention that is still `needs scale verification`:
+
 - Redacted collection artifacts: 30 days by default, configurable by administrators.
 - Audit and notification delivery metadata: 13 months, excluding encrypted secrets.
+- Maintained day/hour trend aggregates: horizon and refresh strategy remain unimplemented; the
+  1.44-million-observation result shows this is the next dashboard scaling requirement.
 
-Retention values are product settings with system-enforced maximums. Reducing retention queues a
-background partition/archive job; it never blocks an API request.
+Partition retention values are bounded deployment settings. Lifecycle work runs in the dedicated
+maintenance task and never inside an API request. `DETACH PARTITION` still takes PostgreSQL locks;
+the statement timeout, action cap, and operational monitoring remain important on large tables.
 
 Autovacuum and statistics settings are not fixed globally yet. After the large profile, tune the
 high-write observation partitions independently and raise statistics targets only for columns whose
@@ -187,7 +269,7 @@ selectivity estimates are demonstrably wrong.
 
 PostgreSQL remains the source of truth. Redis is permitted for:
 
-- a distributed collection lock keyed by canonical query hash;
+- atomic provider/route concurrency leases, start pacing, and owner-fenced heartbeat state;
 - short-lived latest-price and route-summary responses;
 - SSE fan-out and transient progress state;
 - rate-limit counters and idempotency coordination;

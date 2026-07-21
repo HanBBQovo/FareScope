@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from uuid import uuid4
 
 import pytest
@@ -50,7 +50,7 @@ pytestmark = [
 async def test_successful_run_creates_deduplicated_alert_and_delivery() -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
-    observed_at = datetime.now(UTC).replace(microsecond=0)
+    observed_at = datetime(2026, 7, 20, 15, tzinfo=UTC)
     async with engine.connect() as connection:
         transaction = await connection.begin()
         session = AsyncSession(bind=connection, expire_on_commit=False)
@@ -291,6 +291,40 @@ async def test_successful_run_creates_deduplicated_alert_and_delivery() -> None:
             )
             assert len(works) == 1
             assert works[0].destination == "https://hooks.example.test/fare"
+            delivery = await session.get(NotificationDelivery, works[0].delivery_id)
+            assert delivery is not None
+            delivery.status = "pending"
+            delivery.attempt_count = 0
+            delivery.next_attempt_at = observed_at
+            encrypted_destination = channel.secret_ciphertext
+            channel.secret_ciphertext = None
+            channel.timezone = "Asia/Shanghai"
+            channel.quiet_hours_start = time(22)
+            channel.quiet_hours_end = time(8)
+            channel.allowed_weekdays = [2]
+            await session.flush()
+
+            deferred = await claim_pending_deliveries(
+                session,
+                secret_box=secret_box,
+                now=observed_at,
+            )
+            assert deferred == []
+            assert delivery.status == "pending"
+            assert delivery.attempt_count == 0
+            assert delivery.error_code is None
+            assert delivery.next_attempt_at == datetime(2026, 7, 22, 0, tzinfo=UTC)
+
+            channel.secret_ciphertext = encrypted_destination
+            await session.flush()
+            resumed_at = datetime(2026, 7, 22, 0, tzinfo=UTC)
+            works = await claim_pending_deliveries(
+                session,
+                secret_box=secret_box,
+                now=resumed_at,
+            )
+            assert len(works) == 1
+            assert works[0].attempt_count == 1
             await finish_delivery(
                 session,
                 delivery_id=works[0].delivery_id,
@@ -299,12 +333,10 @@ async def test_successful_run_creates_deduplicated_alert_and_delivery() -> None:
                     retryable=False,
                     response_metadata={"httpStatus": 204},
                 ),
-                now=observed_at,
+                now=resumed_at,
             )
-            delivery = await session.get(NotificationDelivery, works[0].delivery_id)
-            assert delivery is not None
             assert delivery.status == "succeeded"
-            assert delivery.sent_at == observed_at
+            assert delivery.sent_at == resumed_at
             assert run.alerts_evaluated_at == observed_at
         finally:
             await session.close()

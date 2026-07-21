@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     collection_retry_base_seconds: int = Field(default=60, ge=5, le=3600)
     collection_retry_max_seconds: int = Field(default=1800, ge=30, le=21600)
     collection_retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
+    collection_coordination_backend: Literal["local", "redis"] = "local"
+    collection_coordination_lease_ttl_seconds: float = Field(default=180, ge=150, le=3600)
+    collection_coordination_acquire_timeout_seconds: float = Field(
+        default=120,
+        ge=1,
+        le=3600,
+    )
+    collection_coordination_poll_interval_seconds: float = Field(default=0.5, ge=0.05, le=10)
+    collection_coordination_redis_timeout_seconds: float = Field(default=2, ge=0.1, le=30)
+    collection_coordination_key_prefix: str = Field(
+        default="farescope:collection-coordination",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9:_-]+$",
+    )
     collection_provider_concurrency: int = Field(default=2, ge=1, le=32)
     collection_route_concurrency: int = Field(default=1, ge=1, le=8)
     collection_minimum_interval_seconds: float = Field(default=3.0, ge=0, le=3600)
@@ -55,6 +70,17 @@ class Settings(BaseSettings):
     collection_scheduler_dispatch_batch_size: int = Field(default=100, ge=1, le=1000)
     collection_schedule_bucket_seconds: int = Field(default=300, ge=30, le=86400)
     collection_partition_maintenance_seconds: int = Field(default=3600, ge=300, le=86400)
+    collection_partition_archive_after_months: int | None = Field(
+        default=24,
+        ge=3,
+        le=1200,
+    )
+    collection_partition_purge_after_months: int | None = Field(
+        default=None,
+        ge=4,
+        le=2400,
+    )
+    collection_partition_max_actions: int = Field(default=2, ge=1, le=24)
 
     @field_validator("collector_browser_channel", mode="before")
     @classmethod
@@ -66,12 +92,45 @@ class Settings(BaseSettings):
             return None
         return normalized
 
+    @field_validator(
+        "collection_partition_archive_after_months",
+        "collection_partition_purge_after_months",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_partition_retention(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().casefold() in {"", "0", "none", "off"}:
+            return None
+        if value == 0:
+            return None
+        return value
+
     @model_validator(mode="after")
     def validate_production_cookies(self) -> "Settings":
         if self.environment == "production" and not self.session_cookie_secure:
             raise ValueError("secure session cookies are required in production")
         if self.environment == "production" and self.secret_encryption_key is None:
             raise ValueError("a secret encryption key is required in production")
+        if self.environment == "production" and self.collection_coordination_backend != "redis":
+            raise ValueError("Redis collection coordination is required in production")
+        if (
+            self.collection_coordination_backend == "redis"
+            and self.collection_coordination_acquire_timeout_seconds
+            >= self.collection_run_lease_seconds
+        ):
+            raise ValueError(
+                "collection coordination acquire timeout must be shorter than the run lease"
+            )
+        if self.collection_partition_purge_after_months is not None:
+            if self.collection_partition_archive_after_months is None:
+                raise ValueError("partition purging requires archiving to be enabled")
+            if (
+                self.collection_partition_purge_after_months
+                <= self.collection_partition_archive_after_months
+            ):
+                raise ValueError("partition purge retention must exceed archive retention")
         return self
 
 

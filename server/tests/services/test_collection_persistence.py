@@ -490,6 +490,71 @@ async def test_fixture_capture_persists_idempotent_calendar_and_itinerary_graph(
             context.filters.max_price_minor = 200000
             assert await load_subscription_latest_fares(session, contexts=(context,)) == {}
 
+            def batch_context(
+                *,
+                airline_codes: list[str] | None = None,
+                origin_airport_codes: list[str] | None = None,
+                destination_airport_codes: list[str] | None = None,
+                max_price_minor: int | None = None,
+                max_stops: int | None = None,
+                max_duration_minutes: int | None = None,
+                departure_time_start_minutes: int | None = None,
+                departure_time_end_minutes: int | None = None,
+            ) -> SubscriptionFareContext:
+                local_subscription = Subscription(
+                    id=uuid4(),
+                    user_id=user.id,
+                    search_query_id=query.id,
+                    name="Set-based equivalence route",
+                    enabled=True,
+                    poll_interval_seconds=900,
+                    tags=[],
+                )
+                return SubscriptionFareContext(
+                    subscription=local_subscription,
+                    search_query=query,
+                    filters=SubscriptionFilter(
+                        subscription_id=local_subscription.id,
+                        airline_codes=airline_codes or [],
+                        origin_airport_codes=origin_airport_codes or [],
+                        destination_airport_codes=destination_airport_codes or [],
+                        max_price_minor=max_price_minor,
+                        max_stops=max_stops,
+                        max_duration_minutes=max_duration_minutes,
+                        departure_time_start_minutes=departure_time_start_minutes,
+                        departure_time_end_minutes=departure_time_end_minutes,
+                        additional_filters={},
+                    ),
+                    legs=context.legs,
+                )
+
+            batch_contexts = (
+                batch_context(),
+                batch_context(airline_codes=["ZZ"]),
+                batch_context(airline_codes=["NO"]),
+                batch_context(origin_airport_codes=["PVG"]),
+                batch_context(destination_airport_codes=["NRT"]),
+                batch_context(max_price_minor=200000),
+                batch_context(max_stops=0),
+                batch_context(max_duration_minutes=200),
+                batch_context(
+                    departure_time_start_minutes=540,
+                    departure_time_end_minutes=600,
+                ),
+            )
+            singleton_latest = {}
+            for batch_item in batch_contexts:
+                singleton_latest.update(
+                    await load_subscription_latest_fares(
+                        session,
+                        contexts=(batch_item,),
+                    )
+                )
+            assert await load_subscription_latest_fares(
+                session,
+                contexts=batch_contexts,
+            ) == singleton_latest
+
             first_offers, first_has_more, offer_total = await _load_offers(
                 session,
                 later_run.id,

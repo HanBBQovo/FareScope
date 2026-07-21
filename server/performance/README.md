@@ -16,7 +16,24 @@ the initial migration. If the horizon changes, create all required partitions be
 
 ## Run
 
-From `server/`, with a migrated disposable database:
+All commands below run from `server/`. The Python path is the preferred workflow when the host has
+no `psql` client. It creates a new database but never drops or reuses one, and both the name prefix
+and confirmation string are mandatory:
+
+```bash
+export FARESCOPE_PERF_ADMIN_URL='postgresql://farescope:farescope@127.0.0.1:5432/postgres'
+uv run python -m performance.create_database farescope_perf_reference_20260721 \
+  --confirm I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE
+
+export FARESCOPE_PERF_DATABASE_URL='postgresql://farescope:farescope@127.0.0.1:5432/farescope_perf_reference_20260721'
+export FARESCOPE_DATABASE_URL='postgresql+asyncpg://farescope:farescope@127.0.0.1:5432/farescope_perf_reference_20260721'
+uv run alembic upgrade head
+uv run python -m performance.seed_database \
+  --confirm I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE
+```
+
+`seed_database.py` executes the same checked-in `generate_load.sql` through asyncpg. The psql
+workflow remains available for environments that provide the client:
 
 ```bash
 export FARESCOPE_PERF_DATABASE_URL='postgresql://farescope:farescope@localhost:5432/farescope_perf'
@@ -64,8 +81,50 @@ hydration, raw/daily history, one-way/round-trip calendars, dashboard trends/cou
 health, then reruns every captured read with `EXPLAIN (ANALYZE, BUFFERS, SETTINGS, FORMAT JSON)`.
 It is read-only, but `EXPLAIN ANALYZE` executes each query. Run it three times for warm-cache ranges.
 
-Run plan output at least three times after seeding. The first run is cold-cache evidence; the next
-three runs are the warm measurements used for SLO comparison.
+Run the concurrent service and full in-process ASGI API matrix with:
+
+```bash
+uv run python -m performance.concurrent_benchmark \
+  --confirm I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE \
+  --concurrency 1,8,16,32 \
+  --requests-per-scenario 80 \
+  --warmup-requests 4 \
+  --users 64 \
+  --client-cold-probe \
+  --output performance/results/reference-concurrency.json
+```
+
+The matrix covers a 100-route dashboard, fare search, daily price history, calendar prices,
+subscription lists, collection-run lists, and collection operations. It records p50/p95/p99,
+throughput, status/error counts, SQL statement timing, private QueuePool acquisition timing, peak
+checked-out connections, and database/environment metadata. The QueuePool hook is intentionally
+performance-only and uses SQLAlchemy's private `_do_get` method; rerun the smoke matrix after a
+SQLAlchemy upgrade.
+
+The API layer executes authentication, ownership checks, database reads, Pydantic serialization,
+and middleware through `httpx.ASGITransport`. It does not include a TCP socket, Uvicorn scheduling,
+TLS, or reverse-proxy latency. Fare search uses an existing successful fixture run and stubs only
+canonical-search creation plus collector dispatch, so no provider request or Celery publish occurs.
+Collection operations executes the real status/schema SQL but stubs Redis `LLEN` to an immediate
+unavailable result; Redis latency is a separate operational benchmark.
+
+To run a scale larger than reference without claiming the 14.4-million-row large profile:
+
+```bash
+uv run python -m performance.seed_database \
+  --confirm I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE \
+  --observations-per-query 720
+```
+
+With 2,000 searches this produces 1.44 million observations, or 3x reference. Use a fresh database;
+rerunning a different scale in an already-seeded database keeps existing deterministic rows and is
+not an equivalent fresh distribution.
+
+Run plan output at least three times after seeding. A fresh SQLAlchemy client pool is only
+client/pool-cold evidence. It is not a PostgreSQL or operating-system cold-cache run: true cold
+evidence requires a dedicated PostgreSQL instance whose shared buffers can be reset and a host on
+which the page cache can be safely evicted. Never restart or purge a shared developer/production
+server to manufacture a cold-cache number.
 
 ## Acceptance checklist
 

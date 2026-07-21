@@ -19,7 +19,7 @@ def test_alembic_has_one_linear_head() -> None:
     config = Config("alembic.ini")
     scripts = ScriptDirectory.from_config(config)
 
-    assert scripts.get_heads() == ["20260720_0010"]
+    assert scripts.get_heads() == ["20260720_0012"]
     assert scripts.get_base() == "20260720_0001"
 
 
@@ -45,12 +45,13 @@ def test_username_backfill_is_unique_and_preserves_display_names() -> None:
         )
 
         migration._backfill_usernames(connection)
-        rows = connection.execute(
-            sa.text(
-                "SELECT username, normalized_username, display_name "
-                "FROM users ORDER BY id"
+        rows = (
+            connection.execute(
+                sa.text("SELECT username, normalized_username, display_name FROM users ORDER BY id")
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
     usernames = [row["username"] for row in rows]
     assert usernames[0] == "alice"

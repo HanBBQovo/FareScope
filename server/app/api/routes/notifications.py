@@ -26,7 +26,7 @@ from app.services.notification_channels import (
     NotificationChannelNotFoundError,
     create_notification_channel,
     list_notification_channels,
-    set_notification_channel_enabled,
+    update_notification_channel,
 )
 
 router = APIRouter()
@@ -39,6 +39,10 @@ def _serialize(channel: NotificationChannel) -> NotificationChannelPublic:
         label=channel.name,
         destinationMasked=str(channel.config_redacted.get("destination_masked", "***")),
         enabled=channel.enabled,
+        timezone=channel.timezone,
+        quietHoursStart=channel.quiet_hours_start,
+        quietHoursEnd=channel.quiet_hours_end,
+        allowedWeekdays=channel.allowed_weekdays,
         verifiedAt=channel.verified_at,
     )
 
@@ -93,6 +97,10 @@ async def add_channel(
                 label=payload.label,
                 destination=payload.destination,
                 secret_box=secret_box,
+                timezone=payload.timezone,
+                quiet_hours_start=payload.quiet_hours_start,
+                quiet_hours_end=payload.quiet_hours_end,
+                allowed_weekdays=payload.allowed_weekdays,
             )
     except NotificationChannelConflictError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -117,12 +125,17 @@ async def update_channel(
 ) -> NotificationChannelPublic:
     try:
         async with database.begin():
-            channel = await set_notification_channel_enabled(
+            channel = await update_notification_channel(
                 database,
                 user=identity.user,
                 channel_id=channel_id,
-                enabled=payload.enabled,
+                updates=payload.model_dump(exclude_unset=True),
             )
     except NotificationChannelNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+    except NotificationChannelError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(error),
+        ) from error
     return _serialize(channel)

@@ -58,6 +58,20 @@ def test_security_tables_store_hashes_or_ciphertext_not_raw_secrets() -> None:
     assert "secret_ciphertext" in channels.c and "secret" not in channels.c
 
 
+def test_notification_channels_store_delivery_schedule_without_plaintext_destination() -> None:
+    channels = Base.metadata.tables["notification_channels"]
+
+    assert {
+        "timezone",
+        "quiet_hours_start",
+        "quiet_hours_end",
+        "allowed_weekdays",
+    }.issubset(channels.c.keys())
+    assert channels.c.timezone.nullable is True
+    assert channels.c.quiet_hours_start.nullable is True
+    assert channels.c.allowed_weekdays.nullable is True
+
+
 def test_user_identity_is_username_based_and_email_is_optional_contact() -> None:
     users = Base.metadata.tables["users"]
 

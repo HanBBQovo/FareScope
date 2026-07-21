@@ -36,6 +36,8 @@ def test_production_compose_defaults_to_chrome_and_checks_startup_marker() -> No
     assert "FARESCOPE_SECRET_ENCRYPTION_KEY" in compose
     assert "FARESCOPE_COLLECTOR_BROWSER_CHANNEL=chrome" in env_example
     assert "FARESCOPE_COLLECTOR_IMAGE_TARGET=collector-runtime" in env_example
+    assert "FARESCOPE_COLLECTION_COORDINATION_BACKEND:-redis" in compose
+    assert "FARESCOPE_COLLECTION_COORDINATION_BACKEND=redis" in env_example
 
 
 def test_collector_entrypoint_has_valid_shell_syntax() -> None:

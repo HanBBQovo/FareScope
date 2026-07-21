@@ -22,10 +22,13 @@ from app.collectors.runtime import (
     BrowserRunConfig,
     BrowserRunResult,
     CaptureDiagnostic,
+    CollectionCoordinationError,
+    CollectionRateGate,
     FailureKind,
     PlaywrightCaptureRunner,
     ProviderRouteGate,
     RateLimitPolicy,
+    RedisProviderRouteGate,
     RetryPolicy,
     ctrip_capture_rules,
 )
@@ -63,6 +66,33 @@ def _collection_rate_gate(
     )
 
 
+def _configured_collection_rate_gate(settings: Settings) -> CollectionRateGate:
+    policy = RateLimitPolicy(
+        provider_concurrency=settings.collection_provider_concurrency,
+        route_concurrency=settings.collection_route_concurrency,
+        minimum_interval_seconds=settings.collection_minimum_interval_seconds,
+        jitter_seconds=settings.collection_jitter_seconds,
+    )
+    if settings.collection_coordination_backend == "redis":
+        return RedisProviderRouteGate(
+            settings.redis_url,
+            policy,
+            lease_ttl_seconds=settings.collection_coordination_lease_ttl_seconds,
+            acquire_timeout_seconds=(
+                settings.collection_coordination_acquire_timeout_seconds
+            ),
+            poll_interval_seconds=settings.collection_coordination_poll_interval_seconds,
+            command_timeout_seconds=settings.collection_coordination_redis_timeout_seconds,
+            key_prefix=settings.collection_coordination_key_prefix,
+        )
+    return _collection_rate_gate(
+        settings.collection_provider_concurrency,
+        settings.collection_route_concurrency,
+        settings.collection_minimum_interval_seconds,
+        settings.collection_jitter_seconds,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CollectionClaim:
     run_id: UUID
@@ -88,7 +118,7 @@ async def run_collection_once(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     runner: PlaywrightCaptureRunner | None = None,
-    rate_gate: ProviderRouteGate | None = None,
+    rate_gate: CollectionRateGate | None = None,
     worker_id: str | None = None,
     dispatch_token: str | None = None,
 ) -> dict[str, Any]:
@@ -110,12 +140,7 @@ async def run_collection_once(
         )
         session_factory = create_session_factory(owned_engine)
     capture_runner = runner or PlaywrightCaptureRunner()
-    collection_rate_gate = rate_gate or _collection_rate_gate(
-        runtime_settings.collection_provider_concurrency,
-        runtime_settings.collection_route_concurrency,
-        runtime_settings.collection_minimum_interval_seconds,
-        runtime_settings.collection_jitter_seconds,
-    )
+    collection_rate_gate = rate_gate or _configured_collection_rate_gate(runtime_settings)
     lease_owner = (worker_id or os.getenv("FARESCOPE_WORKER_ID") or socket.gethostname())[:160]
     worker_lease_owner = f"worker:{lease_owner}"[:160]
 
@@ -163,6 +188,12 @@ async def run_collection_once(
                 or os.getenv("FARESCOPE_COLLECTION_SCREENSHOT_DIR")
             )
             async with collection_rate_gate.slot(claim.provider_code, claim.route_key):
+                await _renew_collection_run_lease(
+                    session_factory,
+                    run_id=run_id,
+                    lease_owner=worker_lease_owner,
+                    lease_seconds=runtime_settings.collection_run_lease_seconds,
+                )
                 browser_result = await capture_runner.run(
                     BrowserRunConfig(
                         provider=claim.provider_code,
@@ -178,6 +209,20 @@ async def run_collection_once(
                     ),
                     capture_rules=ctrip_capture_rules(),
                 )
+        except CollectionRunUnavailableError as exc:
+            return {
+                "run_id": str(run_id),
+                "status": "skipped",
+                "reason": str(exc),
+            }
+        except CollectionCoordinationError as exc:
+            return await _record_coordination_failure(
+                session_factory,
+                run_id=run_id,
+                error=exc,
+                expected_lease_owner=worker_lease_owner,
+                settings=runtime_settings,
+            )
         except Exception as exc:  # noqa: BLE001 - runtime/config exceptions need durable state
             await _record_unhandled_failure(
                 session_factory,
@@ -524,6 +569,79 @@ async def _record_unhandled_failure(
         return
 
 
+async def _record_coordination_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    run_id: UUID,
+    error: CollectionCoordinationError,
+    expected_lease_owner: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    failed_at = datetime.now(UTC)
+    retry_at: datetime | None = None
+    try:
+        async with session_factory() as session, session.begin():
+            run = await _load_run_for_update(session, run_id)
+            _assert_owned_lease(run, expected_lease_owner)
+            run.upstream_status = error.code
+            _clear_lease(run)
+            await record_collection_failure(
+                session,
+                run=run,
+                code=error.code,
+                message=str(error),
+                retryable=True,
+                diagnostics=(
+                    {
+                        "code": error.code,
+                        "message": str(error),
+                        "retryable": True,
+                    },
+                ),
+                finished_at=failed_at,
+            )
+            retry_at = _schedule_retry_if_eligible(
+                run,
+                retryable=True,
+                failed_at=failed_at,
+                base_seconds=settings.collection_retry_base_seconds,
+                maximum_seconds=settings.collection_retry_max_seconds,
+                jitter_ratio=settings.collection_retry_jitter_ratio,
+            )
+    except CollectionRunUnavailableError as exc:
+        return {
+            "run_id": str(run_id),
+            "status": "skipped",
+            "reason": str(exc),
+        }
+    except Exception as exc:  # noqa: BLE001 - preserve a bounded task result on DB failure
+        await _record_unhandled_failure(
+            session_factory,
+            run_id=run_id,
+            code="collection_coordination_record_error",
+            message="Collection coordination failure could not be recorded",
+            exception=exc,
+            expected_lease_owner=expected_lease_owner,
+        )
+        return {
+            "run_id": str(run_id),
+            "status": CollectionStatus.FAILED.value,
+            "error_code": "collection_coordination_record_error",
+        }
+
+    return {
+        "run_id": str(run_id),
+        "status": (
+            CollectionStatus.PENDING.value
+            if retry_at is not None
+            else CollectionStatus.FAILED.value
+        ),
+        "error_code": error.code,
+        "retryable": True,
+        "retry_scheduled_at": retry_at.isoformat() if retry_at is not None else None,
+    }
+
+
 async def _load_run_for_update(session: AsyncSession, run_id: UUID) -> CollectionRun:
     run = await session.scalar(
         select(CollectionRun).where(CollectionRun.id == run_id).with_for_update()
@@ -531,6 +649,20 @@ async def _load_run_for_update(session: AsyncSession, run_id: UUID) -> Collectio
     if run is None:
         raise CollectionRunNotFoundError(str(run_id))
     return run
+
+
+async def _renew_collection_run_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    run_id: UUID,
+    lease_owner: str,
+    lease_seconds: int,
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session, session.begin():
+        run = await _load_run_for_update(session, run_id)
+        _assert_owned_lease(run, lease_owner, now=now)
+        run.lease_expires_at = now + timedelta(seconds=lease_seconds)
 
 
 async def _required_row(

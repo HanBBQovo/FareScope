@@ -73,5 +73,7 @@ def test_page_size_contract_has_a_hard_ceiling() -> None:
 def test_load_generator_requires_disposable_database_confirmation() -> None:
     generator = GENERATOR_SQL.read_text()
     assert "I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE" in generator
+    assert "current_database()" in generator
+    assert "farescope_perf_" in generator
     assert "TRUNCATE" not in generator.upper()
     assert "ANALYZE price_observations" in generator

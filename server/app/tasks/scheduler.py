@@ -9,7 +9,10 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.partitions import ensure_all_observation_partitions
+from app.db.partitions import (
+    ensure_all_observation_partitions,
+    maintain_observation_partition_lifecycle,
+)
 from app.db.session import create_engine, create_session_factory
 from app.services.collection_dispatch import Publisher, publish_dispatch_leases_safely
 from app.services.collection_scheduler import plan_scheduler_tick
@@ -114,10 +117,26 @@ async def maintain_observation_partitions(
                 connection,
                 reference=current_time,
             )
+            lifecycle_actions = await maintain_observation_partition_lifecycle(
+                connection,
+                reference=current_time,
+                archive_after_months=(runtime_settings.collection_partition_archive_after_months),
+                purge_after_months=(runtime_settings.collection_partition_purge_after_months),
+                max_actions=runtime_settings.collection_partition_max_actions,
+            )
         return {
             "status": "ok",
             "partition_count": sum(len(names) for names in partitions.values()),
             "tables": {table: list(names) for table, names in partitions.items()},
+            "lifecycle_actions": [
+                {
+                    "action": item.action,
+                    "table": item.parent_table,
+                    "partition": item.partition_name,
+                    "month": item.partition_month.isoformat(),
+                }
+                for item in lifecycle_actions
+            ],
         }
     finally:
         if owned_engine is not None:

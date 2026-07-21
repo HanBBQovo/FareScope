@@ -17,6 +17,7 @@ import httpx
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.notification_schedule import NotificationScheduleError, next_delivery_at
 from app.models import AlertEvent, NotificationChannel, NotificationDelivery
 from app.models.enums import DeliveryStatus
 from app.security import SecretBox, SecretDecryptionError
@@ -53,6 +54,9 @@ async def claim_pending_deliveries(
     stale_after_seconds: int = 900,
 ) -> list[DeliveryWork]:
     now = now or datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("delivery claim time must be timezone-aware")
+    now = now.astimezone(UTC)
     stale_before = now - timedelta(seconds=stale_after_seconds)
     statement = (
         select(NotificationDelivery, NotificationChannel, AlertEvent)
@@ -65,13 +69,16 @@ async def claim_pending_deliveries(
             NotificationChannel.enabled.is_(True),
             or_(
                 (
-                    NotificationDelivery.status.in_(
-                        [DeliveryStatus.PENDING.value, DeliveryStatus.FAILED.value]
-                    )
+                    (NotificationDelivery.status == DeliveryStatus.PENDING.value)
                     & (
                         NotificationDelivery.next_attempt_at.is_(None)
                         | (NotificationDelivery.next_attempt_at <= now)
                     )
+                ),
+                (
+                    (NotificationDelivery.status == DeliveryStatus.FAILED.value)
+                    & NotificationDelivery.next_attempt_at.is_not(None)
+                    & (NotificationDelivery.next_attempt_at <= now)
                 ),
                 (
                     (NotificationDelivery.status == DeliveryStatus.SENDING.value)
@@ -86,6 +93,25 @@ async def claim_pending_deliveries(
     rows = (await session.execute(statement)).all()
     works: list[DeliveryWork] = []
     for delivery, channel, event in rows:
+        try:
+            scheduled_at = next_delivery_at(
+                now,
+                timezone_name=channel.timezone,
+                quiet_hours_start=channel.quiet_hours_start,
+                quiet_hours_end=channel.quiet_hours_end,
+                allowed_weekdays=channel.allowed_weekdays,
+            )
+        except NotificationScheduleError as error:
+            delivery.status = DeliveryStatus.FAILED.value
+            delivery.error_code = "invalid_delivery_schedule"
+            delivery.error_message = str(error)
+            delivery.next_attempt_at = None
+            continue
+        if scheduled_at > now:
+            if delivery.status == DeliveryStatus.SENDING.value:
+                delivery.status = DeliveryStatus.PENDING.value
+            delivery.next_attempt_at = scheduled_at
+            continue
         try:
             if channel.secret_ciphertext is None:
                 raise SecretDecryptionError("notification channel has no encrypted destination")

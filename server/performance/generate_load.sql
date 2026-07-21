@@ -14,6 +14,14 @@ SELECT :'perf_confirm' = 'I_UNDERSTAND_THIS_IS_A_DISPOSABLE_DATABASE' AS perf_co
 \quit
 \endif
 
+SELECT left(current_database(), 15) = 'farescope_perf_' AS perf_database_name_valid
+\gset
+\if :perf_database_name_valid
+\else
+\echo 'Refusing to seed: database name must start with farescope_perf_'
+\quit
+\endif
+
 \if :{?users}
 \else
 \set users 500
@@ -421,6 +429,49 @@ SELECT
 FROM generate_series(1, :queue_count) AS series(queue_number)
 ON CONFLICT DO NOTHING;
 
+INSERT INTO schema_observations (
+    id,
+    provider_id,
+    collection_run_id,
+    endpoint,
+    schema_fingerprint,
+    field_summary,
+    first_seen_at,
+    last_seen_at,
+    occurrence_count,
+    created_at
+)
+SELECT
+    md5('farescope-perf-schema-' || observation_number)::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    md5(
+        'farescope-perf-run-success-'
+        || (((observation_number - 1) % :query_count) + 1)
+    )::uuid,
+    CASE observation_number % 4
+        WHEN 0 THEN '/itinerary/api/12808/lowestPrice'
+        WHEN 1 THEN '/international/search/api/search/batchSearch'
+        WHEN 2 THEN '/itinerary/api/12808/products'
+        ELSE '/international/search/api/flightlist'
+    END,
+    md5('farescope-perf-schema-fingerprint-' || observation_number),
+    jsonb_build_object(
+        'shape',
+        jsonb_build_object(
+            'data', 'object',
+            'status', 'string',
+            format('fixture_field_%s', observation_number % 20), 'array'
+        ),
+        'perf_fixture',
+        true
+    ),
+    current_timestamp - observation_number * interval '12 hours',
+    current_timestamp - observation_number * interval '5 minutes',
+    observation_number * 3,
+    current_timestamp - observation_number * interval '12 hours'
+FROM generate_series(1, 200) AS observations(observation_number)
+ON CONFLICT DO NOTHING;
+
 INSERT INTO itineraries (
     id,
     collection_run_id,
@@ -776,6 +827,7 @@ ANALYZE search_legs;
 ANALYZE subscriptions;
 ANALYZE subscription_filters;
 ANALYZE collection_runs;
+ANALYZE schema_observations;
 ANALYZE itineraries;
 ANALYZE segments;
 ANALYZE fare_offers;
@@ -811,6 +863,10 @@ UNION ALL
 SELECT 'fare offers', count(*)
 FROM fare_offers
 WHERE offer_metadata @> '{"perf_fixture": true}'::jsonb
+UNION ALL
+SELECT 'schema observations', count(*)
+FROM schema_observations
+WHERE field_summary @> '{"perf_fixture": true}'::jsonb
 UNION ALL
 SELECT 'latest calendar prices', count(*)
 FROM latest_calendar_price_snapshots

@@ -35,6 +35,18 @@ class NotificationChannel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "channel_type IN ('email', 'telegram', 'bark', 'pushplus', 'webhook')",
             name="valid_channel_type",
         ),
+        CheckConstraint(
+            "(quiet_hours_start IS NULL) = (quiet_hours_end IS NULL)",
+            name="quiet_hours_pair",
+        ),
+        CheckConstraint(
+            "(quiet_hours_start IS NULL AND allowed_weekdays IS NULL) OR timezone IS NOT NULL",
+            name="schedule_timezone_required",
+        ),
+        CheckConstraint(
+            "allowed_weekdays IS NULL OR jsonb_typeof(allowed_weekdays) = 'array'",
+            name="allowed_weekdays_array",
+        ),
         Index("ix_notification_channels_user_enabled", "user_id", "enabled"),
     )
 
@@ -48,6 +60,10 @@ class NotificationChannel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     config_redacted: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    timezone: Mapped[str | None] = mapped_column(String(64))
+    quiet_hours_start: Mapped[time | None] = mapped_column(Time(timezone=False))
+    quiet_hours_end: Mapped[time | None] = mapped_column(Time(timezone=False))
+    allowed_weekdays: Mapped[list[int] | None] = mapped_column(JSONB(none_as_null=True))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)

@@ -18,6 +18,7 @@ from app.collectors.runtime import (
     CaptureDiagnostic,
     CapturedPayload,
     CaptureRule,
+    CollectionCoordinationUnavailableError,
     FailureKind,
 )
 from app.models import (
@@ -566,6 +567,70 @@ async def test_anti_bot_failure_keeps_classification_and_respects_retry_delay() 
     await engine.dispose()
 
 
+async def test_coordination_failure_is_fail_closed_and_durably_retried() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+    now = datetime.now(UTC).replace(microsecond=0)
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        factory = async_sessionmaker(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            async with factory() as session, session.begin():
+                provider = await session.scalar(
+                    select(Provider).where(Provider.code == "ctrip")
+                )
+                assert provider is not None
+                query, _ = await _create_query_user_and_leg(
+                    session,
+                    suffix="coord-unavailable",
+                )
+                run = CollectionRun(
+                    search_query_id=query.id,
+                    provider_id=provider.id,
+                    idempotency_key=f"coordination-unavailable:{uuid4()}",
+                    status=CollectionStatus.PENDING.value,
+                    attempt=0,
+                    max_attempts=3,
+                    scheduled_at=now,
+                    run_metadata={"trigger": "coordination_failure_test"},
+                )
+                session.add(run)
+                await session.flush()
+                run_id = run.id
+
+            result = await run_collection_once(
+                run_id,
+                settings=Settings(
+                    collection_retry_base_seconds=5,
+                    collection_retry_max_seconds=30,
+                ),
+                session_factory=factory,
+                runner=_NeverRunner(),  # type: ignore[arg-type]
+                rate_gate=_UnavailableGate(),  # type: ignore[arg-type]
+                worker_id="coordination-failure-worker",
+            )
+
+            assert result["status"] == CollectionStatus.PENDING.value
+            assert result["error_code"] == "collection_coordination_unavailable"
+            assert result["retryable"] is True
+            async with factory() as session:
+                persisted = await session.get(CollectionRun, run_id)
+                assert persisted is not None
+                assert persisted.status == CollectionStatus.PENDING.value
+                assert persisted.attempt == 1
+                assert persisted.lease_owner is None
+                assert persisted.error_code == "collection_coordination_unavailable"
+                assert persisted.run_metadata["failure"]["retryable"] is True
+                assert persisted.scheduled_at > now
+        finally:
+            await transaction.rollback()
+    await engine.dispose()
+
+
 async def _create_query_user_and_leg(
     session: AsyncSession,
     *,
@@ -701,3 +766,31 @@ class _AntiBotRunner:
             ),
             expected_capture_names=config.expected_capture_names,
         )
+
+
+class _UnavailableSlot:
+    async def __aenter__(self) -> None:
+        raise CollectionCoordinationUnavailableError(
+            "Redis collection coordination is unavailable"
+        )
+
+    async def __aexit__(self, exc_type, exc, traceback) -> bool:
+        del exc_type, exc, traceback
+        return False
+
+
+class _UnavailableGate:
+    def slot(self, provider: str, route_key: str) -> _UnavailableSlot:
+        del provider, route_key
+        return _UnavailableSlot()
+
+
+class _NeverRunner:
+    async def run(
+        self,
+        config: BrowserRunConfig,
+        *,
+        capture_rules: tuple[CaptureRule, ...],
+    ) -> BrowserRunResult:
+        del config, capture_rules
+        raise AssertionError("browser runner must not execute without a coordination lease")

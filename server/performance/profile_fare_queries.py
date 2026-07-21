@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.api.routes.fares import _load_offers
 from app.domain.search import SearchFilters
 from app.models import SearchLeg, SearchQuery, Subscription, SubscriptionFilter, User
+from app.services.collection_operations import _load_run_status_counts, _load_schema_signals
 from app.services.fare_data import (
     SubscriptionFareContext,
     list_latest_calendar_prices,
@@ -227,6 +228,21 @@ async def main() -> None:
         await _measure(
             capture_label,
             lambda: load_collection_health(session, user_id=user.id, now=now),
+        )
+        capture_label = "collection-run-status-counts"
+        await _measure(
+            capture_label,
+            lambda: _load_run_status_counts(session, user_id=user.id, now=now),
+        )
+        capture_label = "provider-schema-signals"
+        await _measure(
+            capture_label,
+            lambda: _load_schema_signals(
+                session,
+                user_id=user.id,
+                now=now,
+                limit=20,
+            ),
         )
 
     event.remove(engine.sync_engine, "before_cursor_execute", capture)
