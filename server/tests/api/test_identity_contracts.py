@@ -21,6 +21,6 @@ def test_auth_requests_use_username_and_password_only() -> None:
         assert set(properties) == {"username", "password"}
         assert set(schemas[schema_name]["required"]) == {"username", "password"}
 
-    assert schemas["RegisterRequest"]["properties"]["password"]["minLength"] == 4
-    assert schemas["BootstrapAdminRequest"]["properties"]["password"]["minLength"] == 4
+    assert schemas["RegisterRequest"]["properties"]["password"]["minLength"] == 1
+    assert schemas["BootstrapAdminRequest"]["properties"]["password"]["minLength"] == 1
     assert schemas["LoginRequest"]["properties"]["password"]["minLength"] == 1

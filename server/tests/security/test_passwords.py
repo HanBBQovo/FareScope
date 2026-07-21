@@ -12,15 +12,15 @@ def test_password_hash_round_trip() -> None:
     assert not password_needs_rehash(encoded)
 
 
-def test_short_password_is_rejected() -> None:
-    with pytest.raises(ValueError, match="at least 4"):
-        hash_password("123")
+def test_empty_password_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        hash_password("")
 
 
-def test_four_character_password_is_accepted() -> None:
-    encoded = hash_password("1234")
+def test_single_character_password_is_accepted() -> None:
+    encoded = hash_password("1")
 
-    assert verify_password("1234", encoded)
+    assert verify_password("1", encoded)
 
 
 def test_unknown_hash_is_handled_as_invalid() -> None:

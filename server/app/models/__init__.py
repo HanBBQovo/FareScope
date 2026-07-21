@@ -14,6 +14,7 @@ from app.models.collection import (
     SchemaObservation,
     Segment,
 )
+from app.models.comparisons import ComparisonView, ComparisonViewItem
 from app.models.exports import ExportJob, ExportJobCollectionRun
 from app.models.identity import AuditEvent, User, UserSession
 from app.models.notifications import (
@@ -33,6 +34,8 @@ __all__ = [
     "CalendarPriceObservation",
     "CollectionArtifact",
     "CollectionRun",
+    "ComparisonView",
+    "ComparisonViewItem",
     "DailyPriceAggregate",
     "DailyTrendAggregate",
     "DailyTrendAggregateCoverage",

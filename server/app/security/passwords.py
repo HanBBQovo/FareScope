@@ -1,7 +1,7 @@
 from pwdlib import PasswordHash
 from pwdlib.exceptions import PwdlibError
 
-MIN_PASSWORD_LENGTH = 4
+MIN_PASSWORD_LENGTH = 1
 MAX_PASSWORD_BYTES = 1024
 
 _password_hash = PasswordHash.recommended()
@@ -9,7 +9,7 @@ _password_hash = PasswordHash.recommended()
 
 def _validate_password_size(password: str) -> None:
     if len(password) < MIN_PASSWORD_LENGTH:
-        raise ValueError(f"password must contain at least {MIN_PASSWORD_LENGTH} characters")
+        raise ValueError("password must not be empty")
     if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         raise ValueError("password is too long")
 

@@ -34,7 +34,8 @@ The product focus is airfare data. Account functionality is deliberately minimal
 - One-way and round-trip searches with direct, airline, airport, price, stop, duration, time, cabin,
   and passenger constraints where normalized fields support them.
 - Persistent current fares, itinerary details, price history, low-fare calendars, round-trip date
-  matrices, collection health, subscriptions, alerts, and delivery attempts.
+  matrices, saved cross-route comparisons, collection health, subscriptions, alerts, and delivery
+  attempts.
 - Multiple users may register and own independent subscriptions, rules, and notification channels.
 - Identical collection queries are canonicalized and collected once for all interested users.
 - Advanced recommendations are enabled only after their evidence and sample-size gates are met.
@@ -42,7 +43,7 @@ The product focus is airfare data. Account functionality is deliberately minimal
 ## Minimal user model
 
 - Registration and login require only a username and password.
-- Passwords require at least 4 characters and have no composition rule or confirmation field.
+- Passwords only need to be non-empty and have no composition rule or confirmation field.
 - Email is not an account identity and there is no email verification flow.
 - There is no invitation, organization, team, member-management, or granular-role product surface.
 - The internal admin marker exists only for bootstrap and operational work.
@@ -82,6 +83,7 @@ stored zero raw response artifacts. It did not fabricate itinerary offers.
 | Low-fare calendar | implemented | Uses latest date-pair snapshots with keyset pagination. |
 | Price history and charts | implemented | Meaning grows as repeated detailed price observations accumulate. |
 | Round-trip matrix | implemented | Uses verified departure/return date pairs and total minor-unit prices. |
+| Saved route comparison | implemented | Saves 2-8 same-currency subscriptions; detailed filtered fares and exact-date calendar prices remain separate, and round trips require a real total price. |
 | Threshold/drop/new-low/direct alerts | implemented | History-based rules require prior detailed observations to trigger meaningfully. |
 | Anomaly detection | history dependent | Requires a defined baseline and minimum sample count. |
 | Buy-now/wait guidance | history dependent | Requires at least 90 days of suitable horizon data and calibrated confidence. |
@@ -232,7 +234,7 @@ unverified. See `docs/PERFORMANCE.md` for the full contract and reproduction com
 ### M2: Persistence and price APIs
 
 - [x] Canonical query deduplication, monthly partitions, latest snapshots, and migrations through
-  `20260721_0014`.
+  `20260721_0015`.
 - [x] Calendar, itinerary, segment, offer, raw history, aggregate history, and collection health.
 - [x] Owner-scoped keyset pagination and bounded hot queries.
 - [x] Independent result filters and notification target prices.
@@ -246,7 +248,7 @@ unverified. See `docs/PERFORMANCE.md` for the full contract and reproduction com
 ### M3: Minimal multi-user foundation
 
 - [x] Username-only public registration, login, logout, secure cookies, CSRF, and session hashes.
-- [x] Four-character minimum password with no confirmation, email, or invitation workflow.
+- [x] Non-empty password with no confirmation, email, or invitation workflow.
 - [x] Per-user subscription, alert, channel, event, and delivery isolation.
 - [x] Encrypted notification secrets and authentication/configuration audit events.
 - [x] Request IDs and dependency-aware readiness checks.
@@ -261,7 +263,9 @@ unverified. See `docs/PERFORMANCE.md` for the full contract and reproduction com
   available.
 - [x] Optional owner-scoped SSE for persisted collection-state updates with Redis failure fallback;
   unsaved explorer searches retain bounded polling.
-- [ ] Add saved cross-route comparison views.
+- [x] Saved owner-scoped 2-8 route comparison views with idempotent CRUD, optimistic versions,
+  degraded deleted-subscription state, repeatable-read snapshots, and separate detailed/calendar
+  daily trends.
 
 ### M5: Alerts, reporting, and operations
 
@@ -315,8 +319,8 @@ A feature is complete only when all applicable items are true:
   modular monolith.
 - Added FastAPI, Celery, PostgreSQL, Redis, migrations, CI code checks, and deployment topology.
 - Implemented username/password identity and removed invitations/email login.
-- Simplified registration to two fields only and reduced the password minimum to four characters
-  without composition rules.
+- Simplified registration to two fields only and reduced the password minimum to non-empty without
+  composition rules.
 - Added canonical searches, collection persistence, price APIs, Web routes, and redacted Ctrip
   fixtures.
 - Verified the initial GitHub code-check workflows; Docker image publication remains disabled.
@@ -355,9 +359,20 @@ A feature is complete only when all applicable items are true:
   benchmark modes. Strict 480,000- and 1.44-million-row verification reported zero differences.
 - Added owner-scoped collection SSE backed by PostgreSQL truth and Redis Stream hints, including
   session/ownership rechecks, cursor checkpoints, identity-cache clearing, and polling fallback.
+- Reduced public registration passwords to non-empty only, keeping user entry deliberately simple
+  while preserving hashing, secure cookies, sessions, CSRF, and owner-scoped data.
 - Added durable owner-scoped CSV/JSON export jobs with a frozen successful-run manifest, hot/archive
   keyset reads, isolated worker capacity, per-user and global storage bounds, dispatch/worker leases,
   crash cleanup, expiring downloads, and two-phase deletion.
+- Added saved 2-8 route comparison views with same-currency enforcement, owner-safe composite foreign
+  keys, owner-serialized quotas/names, idempotent create, optimistic updates, deleted-subscription
+  degradation, and one fixed-size repeatable-read snapshot request. Detailed filtered fares and
+  exact-date calendar prices use separate trend tracks; calendar data never claims unverified
+  directness and round trips use only non-null provider total prices.
+- Verified the running API end to end with a one-character password, two disabled `SHA-TYO`
+  subscriptions, comparison create/snapshot/reorder/delete, logout, and exact temporary-user cleanup.
+  The snapshot correctly kept detailed and exact-date calendar prices null because no retained
+  observation matched those subscription dates.
 - Kept the documented Vite/API default on port 8000 and verified the active 5278 development proxy
   against the separately configured 8010 API instance.
 - Hardened historical exports so their frozen successful-run manifest must resolve to retained hot

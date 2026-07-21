@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Integer,
     Numeric,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Uuid,
     and_,
     any_,
+    case,
     cast,
     column,
     exists,
@@ -37,6 +39,7 @@ from sqlalchemy.sql.selectable import CTE
 from app.api.pagination import BucketCursor, DatePairCursor, TimestampCursor
 from app.domain.search import SearchFilters
 from app.models import (
+    CalendarPriceObservation,
     CollectionRun,
     DailyTrendAggregate,
     DailyTrendAggregateCoverage,
@@ -178,6 +181,33 @@ class DashboardSubscriptionStats:
 class DashboardPriceAnalytics:
     trend: tuple[HistoryPoint, ...]
     price_change_percent: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionPriceAnalytics:
+    subscription_id: UUID
+    trend: tuple[HistoryPoint, ...]
+    minimum_price_minor: int | None
+    maximum_price_minor: int | None
+    average_price_minor: float | None
+    sample_count: int
+    price_change_percent: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionLatestCalendarFare:
+    subscription_id: UUID
+    lowest_price_minor: int
+    total_price_minor: int | None
+    currency: str
+    observed_at: datetime
+    direct_verified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionCalendarAnalytics:
+    subscription_id: UUID
+    trend: tuple[HistoryPoint, ...]
 
 
 def _fare_filter_values(
@@ -562,6 +592,55 @@ async def load_subscription_fare_context(
         search_query=search_query,
         filters=filters,
         legs=legs,
+    )
+
+
+async def load_subscription_fare_contexts(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    subscription_ids: tuple[UUID, ...],
+) -> tuple[SubscriptionFareContext, ...]:
+    """Load an ordered owner-scoped context set in one joined query."""
+
+    if not subscription_ids:
+        return ()
+    rows = (
+        await session.execute(
+            select(Subscription, SearchQuery, SubscriptionFilter, SearchLeg)
+            .join(SearchQuery, SearchQuery.id == Subscription.search_query_id)
+            .join(
+                SubscriptionFilter,
+                SubscriptionFilter.subscription_id == Subscription.id,
+            )
+            .outerjoin(SearchLeg, SearchLeg.search_query_id == SearchQuery.id)
+            .where(
+                Subscription.user_id == user_id,
+                Subscription.id.in_(subscription_ids),
+            )
+            .order_by(Subscription.id, SearchLeg.position)
+        )
+    ).all()
+    by_subscription: dict[
+        UUID,
+        tuple[Subscription, SearchQuery, SubscriptionFilter, list[SearchLeg]],
+    ] = {}
+    for subscription, search_query, filters, leg in rows:
+        entry = by_subscription.setdefault(
+            subscription.id,
+            (subscription, search_query, filters, []),
+        )
+        if leg is not None:
+            entry[3].append(leg)
+    return tuple(
+        SubscriptionFareContext(
+            subscription=by_subscription[subscription_id][0],
+            search_query=by_subscription[subscription_id][1],
+            filters=by_subscription[subscription_id][2],
+            legs=tuple(by_subscription[subscription_id][3]),
+        )
+        for subscription_id in subscription_ids
+        if subscription_id in by_subscription
     )
 
 
@@ -996,6 +1075,555 @@ async def load_subscription_latest_fares(
                 observed_at=row.finished_at,
             )
     return result
+
+
+async def load_subscription_price_analytics(
+    session: AsyncSession,
+    *,
+    contexts: tuple[SubscriptionFareContext, ...],
+    as_of: datetime,
+    days: int,
+    use_daily_aggregates: bool = True,
+) -> dict[UUID, SubscriptionPriceAnalytics]:
+    """Return one exact daily detailed-fare series per subscription in one SQL statement."""
+
+    if not 2 <= days <= 90:
+        raise ValueError("comparison trend days must be between 2 and 90")
+    if as_of.tzinfo is None:
+        raise ValueError("comparison trend snapshot must include a timezone")
+    if not contexts:
+        return {}
+
+    grouped: dict[tuple[UUID, str, FareFilterSpec], list[UUID]] = {}
+    representative: dict[tuple[UUID, str, FareFilterSpec], SubscriptionFareContext] = {}
+    for context in contexts:
+        key = (
+            context.search_query.id,
+            context.search_query.currency,
+            FareFilterSpec.from_subscription(context.search_query, context.filters),
+        )
+        grouped.setdefault(key, []).append(context.subscription.id)
+        representative.setdefault(key, context)
+    branch_keys = list(grouped)
+    filter_entries = [
+        (branch_number, representative[key], key[2])
+        for branch_number, key in enumerate(branch_keys)
+    ]
+    since = as_of - timedelta(days=days)
+    trend_statements = _comparison_trend_contribution_statements(
+        filter_entries,
+        since=since,
+        as_of=as_of,
+        use_daily_aggregates=use_daily_aggregates,
+    )
+    contribution_statement = (
+        trend_statements[0] if len(trend_statements) == 1 else union_all(*trend_statements)
+    )
+    contributions = contribution_statement.cte("comparison_trend_contributions")
+    daily = (
+        select(
+            contributions.c.branch_number,
+            contributions.c.bucket,
+            func.min(contributions.c.lowest_price_minor).label("lowest_price_minor"),
+            func.max(contributions.c.highest_price_minor).label("highest_price_minor"),
+            func.sum(contributions.c.price_sum_minor).label("price_sum_minor"),
+            func.sum(contributions.c.sample_count).label("sample_count"),
+        )
+        .group_by(contributions.c.branch_number, contributions.c.bucket)
+        .cte("comparison_daily_prices")
+    )
+
+    previous_start = as_of - timedelta(hours=48)
+    current_start = as_of - timedelta(hours=24)
+    rolling_statements = _comparison_rolling_statements(
+        filter_entries,
+        since=previous_start,
+        as_of=as_of,
+    )
+    rolling_statement = (
+        rolling_statements[0] if len(rolling_statements) == 1 else union_all(*rolling_statements)
+    )
+    rolling = rolling_statement.cte("comparison_rolling_observations")
+    rolling_summary = (
+        select(
+            rolling.c.branch_number,
+            func.min(rolling.c.price_minor)
+            .filter(rolling.c.observed_at >= current_start)
+            .label("current_price_minor"),
+            func.min(rolling.c.price_minor)
+            .filter(
+                rolling.c.observed_at >= previous_start,
+                rolling.c.observed_at < current_start,
+            )
+            .label("previous_price_minor"),
+        )
+        .group_by(rolling.c.branch_number)
+        .cte("comparison_rolling_summary")
+    )
+    rows = (
+        await session.execute(
+            select(
+                daily,
+                rolling_summary.c.current_price_minor,
+                rolling_summary.c.previous_price_minor,
+            )
+            .outerjoin(
+                rolling_summary,
+                rolling_summary.c.branch_number == daily.c.branch_number,
+            )
+            .order_by(daily.c.branch_number, daily.c.bucket)
+            .limit(len(branch_keys) * (days + 1))
+        )
+    ).all()
+
+    rows_by_branch: dict[int, list[object]] = {}
+    for row in rows:
+        rows_by_branch.setdefault(row.branch_number, []).append(row)
+    result: dict[UUID, SubscriptionPriceAnalytics] = {}
+    for branch_number, key in enumerate(branch_keys):
+        branch_rows = rows_by_branch.get(branch_number, [])
+        points = tuple(
+            HistoryPoint(
+                observed_at=_as_utc(row.bucket),
+                price_minor=int(row.lowest_price_minor),
+                lowest_price_minor=int(row.lowest_price_minor),
+                highest_price_minor=int(row.highest_price_minor),
+                average_price_minor=float(row.price_sum_minor / row.sample_count),
+                sample_count=int(row.sample_count),
+            )
+            for row in branch_rows
+        )
+        sample_count = sum(int(row.sample_count) for row in branch_rows)
+        price_sum = sum(int(row.price_sum_minor) for row in branch_rows)
+        minimum = min((int(row.lowest_price_minor) for row in branch_rows), default=None)
+        maximum = max((int(row.highest_price_minor) for row in branch_rows), default=None)
+        current = branch_rows[0].current_price_minor if branch_rows else None
+        previous = branch_rows[0].previous_price_minor if branch_rows else None
+        change = (
+            (current - previous) / previous * 100
+            if current is not None and previous not in (None, 0)
+            else None
+        )
+        for subscription_id in grouped[key]:
+            result[subscription_id] = SubscriptionPriceAnalytics(
+                subscription_id=subscription_id,
+                trend=points,
+                minimum_price_minor=minimum,
+                maximum_price_minor=maximum,
+                average_price_minor=(price_sum / sample_count if sample_count else None),
+                sample_count=sample_count,
+                price_change_percent=float(change) if change is not None else None,
+            )
+    return result
+
+
+async def load_subscription_latest_calendar_fares(
+    session: AsyncSession,
+    *,
+    contexts: tuple[SubscriptionFareContext, ...],
+) -> dict[UUID, SubscriptionLatestCalendarFare]:
+    """Load the latest calendar row for each subscription's exact travel date pair."""
+
+    grouped: dict[tuple[UUID, str, date, date | None, bool], list[UUID]] = {}
+    for context in contexts:
+        if not context.legs:
+            continue
+        round_trip = context.search_query.trip_type == "round_trip"
+        return_date = (
+            context.legs[1].departure_date if round_trip and len(context.legs) > 1 else None
+        )
+        key = (
+            context.search_query.id,
+            context.search_query.currency,
+            context.legs[0].departure_date,
+            return_date,
+            round_trip,
+        )
+        grouped.setdefault(key, []).append(context.subscription.id)
+    if not grouped:
+        return {}
+
+    branch_keys = list(grouped)
+    filter_rows = _calendar_filter_values(branch_keys, name="latest_calendar_filters")
+    snapshot = LatestCalendarPriceSnapshot
+    rows = (
+        await session.execute(
+            select(
+                filter_rows.c.branch_number,
+                snapshot.lowest_price_minor,
+                snapshot.total_price_minor,
+                snapshot.currency,
+                snapshot.observed_at,
+                snapshot.direct_verified,
+            )
+            .select_from(filter_rows)
+            .join(
+                snapshot,
+                and_(
+                    snapshot.search_query_id == filter_rows.c.query_id,
+                    snapshot.currency == filter_rows.c.currency,
+                    snapshot.departure_date == filter_rows.c.departure_date,
+                    or_(
+                        and_(
+                            filter_rows.c.round_trip.is_(False),
+                            snapshot.return_date.is_(None),
+                        ),
+                        and_(
+                            filter_rows.c.round_trip.is_(True),
+                            snapshot.return_date == cast(filter_rows.c.return_date, Date),
+                        ),
+                    ),
+                ),
+            )
+        )
+    ).all()
+    result: dict[UUID, SubscriptionLatestCalendarFare] = {}
+    for row in rows:
+        key = branch_keys[row.branch_number]
+        for subscription_id in grouped[key]:
+            result[subscription_id] = SubscriptionLatestCalendarFare(
+                subscription_id=subscription_id,
+                lowest_price_minor=int(row.lowest_price_minor),
+                total_price_minor=(
+                    int(row.total_price_minor) if row.total_price_minor is not None else None
+                ),
+                currency=row.currency,
+                observed_at=row.observed_at,
+                direct_verified=bool(row.direct_verified),
+            )
+    return result
+
+
+async def load_subscription_calendar_analytics(
+    session: AsyncSession,
+    *,
+    contexts: tuple[SubscriptionFareContext, ...],
+    as_of: datetime,
+    days: int,
+) -> dict[UUID, SubscriptionCalendarAnalytics]:
+    """Return exact-date calendar trends separately from verified detailed fares."""
+
+    if not 2 <= days <= 90:
+        raise ValueError("calendar comparison days must be between 2 and 90")
+    if as_of.tzinfo is None:
+        raise ValueError("calendar comparison snapshot must include a timezone")
+
+    grouped: dict[tuple[UUID, str, date, date | None, bool], list[UUID]] = {}
+    for context in contexts:
+        if not context.legs:
+            continue
+        round_trip = context.search_query.trip_type == "round_trip"
+        return_date = (
+            context.legs[1].departure_date if round_trip and len(context.legs) > 1 else None
+        )
+        key = (
+            context.search_query.id,
+            context.search_query.currency,
+            context.legs[0].departure_date,
+            return_date,
+            round_trip,
+        )
+        grouped.setdefault(key, []).append(context.subscription.id)
+    if not grouped:
+        return {}
+
+    branch_keys = list(grouped)
+    filter_rows = _calendar_filter_values(branch_keys, name="calendar_trend_filters")
+    observed_price = case(
+        (
+            filter_rows.c.round_trip.is_(True),
+            CalendarPriceObservation.total_price_minor,
+        ),
+        else_=CalendarPriceObservation.lowest_price_minor,
+    )
+    run_prices = (
+        select(
+            filter_rows.c.branch_number,
+            CalendarPriceObservation.collection_run_id.label("run_id"),
+            func.max(CalendarPriceObservation.observed_at).label("observed_at"),
+            func.min(observed_price).label("price_minor"),
+        )
+        .select_from(filter_rows)
+        .join(
+            CalendarPriceObservation,
+            and_(
+                CalendarPriceObservation.search_query_id == filter_rows.c.query_id,
+                CalendarPriceObservation.currency == filter_rows.c.currency,
+                CalendarPriceObservation.departure_date == filter_rows.c.departure_date,
+                or_(
+                    and_(
+                        filter_rows.c.round_trip.is_(False),
+                        CalendarPriceObservation.return_date.is_(None),
+                    ),
+                    and_(
+                        filter_rows.c.round_trip.is_(True),
+                        CalendarPriceObservation.return_date
+                        == cast(filter_rows.c.return_date, Date),
+                        CalendarPriceObservation.total_price_minor.is_not(None),
+                    ),
+                ),
+                CalendarPriceObservation.observed_at >= as_of - timedelta(days=days),
+                CalendarPriceObservation.observed_at <= as_of,
+            ),
+        )
+        .group_by(
+            filter_rows.c.branch_number,
+            CalendarPriceObservation.collection_run_id,
+        )
+        .cte("calendar_comparison_run_prices")
+    )
+    bucket = func.date_trunc(
+        "day",
+        func.timezone("UTC", run_prices.c.observed_at),
+    ).label("bucket")
+    rows = (
+        await session.execute(
+            select(
+                run_prices.c.branch_number,
+                bucket,
+                func.min(run_prices.c.price_minor).label("lowest_price_minor"),
+                func.max(run_prices.c.price_minor).label("highest_price_minor"),
+                func.avg(run_prices.c.price_minor).label("average_price_minor"),
+                func.count().label("sample_count"),
+            )
+            .select_from(run_prices)
+            .group_by(run_prices.c.branch_number, bucket)
+            .order_by(run_prices.c.branch_number, bucket)
+            .limit(len(branch_keys) * (days + 1))
+        )
+    ).all()
+    rows_by_branch: dict[int, list[object]] = {}
+    for row in rows:
+        rows_by_branch.setdefault(row.branch_number, []).append(row)
+    result: dict[UUID, SubscriptionCalendarAnalytics] = {}
+    for branch_number, key in enumerate(branch_keys):
+        points = tuple(
+            HistoryPoint(
+                observed_at=_as_utc(row.bucket),
+                price_minor=int(row.lowest_price_minor),
+                lowest_price_minor=int(row.lowest_price_minor),
+                highest_price_minor=int(row.highest_price_minor),
+                average_price_minor=float(row.average_price_minor),
+                sample_count=int(row.sample_count),
+            )
+            for row in rows_by_branch.get(branch_number, ())
+        )
+        for subscription_id in grouped[key]:
+            result[subscription_id] = SubscriptionCalendarAnalytics(
+                subscription_id=subscription_id,
+                trend=points,
+            )
+    return result
+
+
+def _calendar_filter_values(
+    keys: list[tuple[UUID, str, date, date | None, bool]],
+    *,
+    name: str,
+):
+    return (
+        values(
+            column("branch_number", Integer),
+            column("query_id", Uuid),
+            column("currency", String(3)),
+            column("departure_date", Date),
+            column("return_date", Date),
+            column("round_trip", Boolean),
+            name=name,
+        )
+        .data(
+            [
+                (
+                    branch_number,
+                    query_id,
+                    currency,
+                    departure_date,
+                    return_date,
+                    round_trip,
+                )
+                for branch_number, (
+                    query_id,
+                    currency,
+                    departure_date,
+                    return_date,
+                    round_trip,
+                ) in enumerate(keys)
+            ]
+        )
+        .cte(name)
+    )
+
+
+def _comparison_trend_contribution_statements(
+    filter_entries: list[tuple[int, SubscriptionFareContext, FareFilterSpec]],
+    *,
+    since: datetime,
+    as_of: datetime,
+    use_daily_aggregates: bool,
+):
+    full_start, full_end = _full_utc_day_range(since, as_of)
+    aggregate_entries = (
+        [entry for entry in filter_entries if entry[2].supports_daily_trend_aggregate]
+        if use_daily_aggregates
+        else []
+    )
+    raw_entries = [entry for entry in filter_entries if entry not in aggregate_entries]
+    statements = []
+    for requires_itinerary_scan in (False, True):
+        matching_entries = [
+            entry
+            for entry in raw_entries
+            if entry[2].requires_itinerary_scan is requires_itinerary_scan
+        ]
+        if not matching_entries:
+            continue
+        filter_rows = _fare_filter_values(
+            [
+                _fare_filter_row(
+                    branch_number,
+                    context.search_query.id,
+                    context.search_query.currency,
+                    filters,
+                )
+                for branch_number, context, filters in matching_entries
+            ],
+            name=(
+                "comparison_raw_scan_filters"
+                if requires_itinerary_scan
+                else "comparison_raw_simple_filters"
+            ),
+        )
+        statements.append(
+            _dashboard_raw_trend_contribution(
+                _dashboard_run_minima_statement(
+                    filter_rows,
+                    since=since,
+                    as_of=as_of,
+                    requires_itinerary_scan=requires_itinerary_scan,
+                ),
+                name=(
+                    "comparison_raw_scan_observations"
+                    if requires_itinerary_scan
+                    else "comparison_raw_simple_observations"
+                ),
+            )
+        )
+
+    if aggregate_entries:
+        aggregate_filter_rows = _dashboard_aggregate_filter_values(
+            [
+                (
+                    branch_number,
+                    context.search_query.id,
+                    context.search_query.currency,
+                    filters.direct_only,
+                )
+                for branch_number, context, filters in aggregate_entries
+            ]
+        )
+        if full_start < full_end:
+            covered, fallback = _dashboard_aggregate_coverage_groups(
+                aggregate_filter_rows,
+                full_start=full_start,
+                full_end=full_end,
+            )
+            statements.append(
+                _dashboard_daily_trend_contribution(
+                    covered,
+                    full_start=full_start,
+                    full_end=full_end,
+                )
+            )
+            statements.append(
+                _dashboard_raw_trend_contribution(
+                    _dashboard_simple_run_minima_statement(
+                        fallback,
+                        range_start=since,
+                        range_end=as_of,
+                        range_end_inclusive=True,
+                    ),
+                    name="comparison_fallback_aggregate_observations",
+                )
+            )
+            if since < full_start:
+                statements.append(
+                    _dashboard_raw_trend_contribution(
+                        _dashboard_simple_run_minima_statement(
+                            covered,
+                            range_start=since,
+                            range_end=full_start,
+                            range_end_inclusive=False,
+                        ),
+                        name="comparison_aggregate_start_boundary_observations",
+                    )
+                )
+            if full_end <= as_of:
+                statements.append(
+                    _dashboard_raw_trend_contribution(
+                        _dashboard_simple_run_minima_statement(
+                            covered,
+                            range_start=max(full_end, since),
+                            range_end=as_of,
+                            range_end_inclusive=True,
+                        ),
+                        name="comparison_aggregate_end_boundary_observations",
+                    )
+                )
+        else:
+            statements.append(
+                _dashboard_raw_trend_contribution(
+                    _dashboard_simple_run_minima_statement(
+                        aggregate_filter_rows,
+                        range_start=since,
+                        range_end=as_of,
+                        range_end_inclusive=True,
+                    ),
+                    name="comparison_no_full_day_observations",
+                )
+            )
+    return statements
+
+
+def _comparison_rolling_statements(
+    filter_entries: list[tuple[int, SubscriptionFareContext, FareFilterSpec]],
+    *,
+    since: datetime,
+    as_of: datetime,
+):
+    statements = []
+    for requires_itinerary_scan in (False, True):
+        matching_entries = [
+            entry
+            for entry in filter_entries
+            if entry[2].requires_itinerary_scan is requires_itinerary_scan
+        ]
+        if not matching_entries:
+            continue
+        filter_rows = _fare_filter_values(
+            [
+                _fare_filter_row(
+                    branch_number,
+                    context.search_query.id,
+                    context.search_query.currency,
+                    filters,
+                )
+                for branch_number, context, filters in matching_entries
+            ],
+            name=(
+                "comparison_rolling_scan_filters"
+                if requires_itinerary_scan
+                else "comparison_rolling_simple_filters"
+            ),
+        )
+        statements.append(
+            _dashboard_run_minima_statement(
+                filter_rows,
+                since=since,
+                as_of=as_of,
+                requires_itinerary_scan=requires_itinerary_scan,
+            )
+        )
+    return statements
 
 
 async def list_latest_calendar_prices(

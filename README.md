@@ -14,6 +14,8 @@ The core product runs locally end to end:
 - owner-scoped subscriptions and notification channels with shared canonical collection;
 - one-way/round-trip exploration, direct and local result filters, current detailed offers when the
   provider returns them, history, low-fare calendars, and round-trip matrices;
+- saved 2-8 route comparison views with separate detailed-fare and exact-date calendar-price
+  tracks, 7/30/90-day trends, stable gaps, and owner-scoped snapshots;
 - headed Google Chrome collection with database leases, Redis cross-process/host pacing, owner
   fencing, retries, partial-data handling, and schema diagnostics;
 - alert rules, events, Webhook/Telegram/Bark/PushPlus delivery, retry, delivery audit, and
@@ -109,13 +111,17 @@ npm ci
 APP_API_PORT=8000 npm run dev
 ```
 
-Open <http://localhost:5278/> and register with a username plus a password of at least 4 characters.
-No email is required. Liveness is `GET /api/health/live`; dependency-aware readiness is
+Open <http://localhost:5278/> and register with a username plus any non-empty password. No email is
+required. Liveness is `GET /api/health/live`; dependency-aware readiness is
 `GET /api/health/ready`.
 
 The History page can create owner-scoped CSV or JSON exports for a subscription and UTC date range.
 The API returns immediately; the Celery worker writes the file in the background. The local example
 stores generated files under `server/data/exports`, which is ignored by Git.
+
+The Comparisons page saves groups of 2-8 same-currency subscriptions. Detailed itinerary fares and
+calendar prices remain separate because calendar responses do not prove a flight is direct. A
+round-trip calendar point is comparable only when the provider supplied a real total price.
 
 ## Verification
 

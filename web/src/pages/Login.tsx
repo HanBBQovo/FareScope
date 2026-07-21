@@ -15,8 +15,6 @@ import { replaceIdentityCache } from '@/lib/identity-cache'
 
 type AuthMode = 'login' | 'register'
 
-const MIN_REGISTRATION_PASSWORD_LENGTH = 4
-
 export default function Login() {
   const [mode, setMode] = useState<AuthMode>('login')
   const [username, setUsername] = useState('')
@@ -51,8 +49,8 @@ export default function Login() {
       setError('用户名需为 3-64 位字母、数字、下划线、点或短横线，且以字母或数字开头')
       return
     }
-    if (isRegister && password.length < MIN_REGISTRATION_PASSWORD_LENGTH) {
-      setError(`密码至少需要 ${MIN_REGISTRATION_PASSWORD_LENGTH} 个字符`)
+    if (isRegister && !password) {
+      setError('密码不能为空')
       return
     }
 
@@ -132,12 +130,12 @@ export default function Login() {
                   type="password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  autoComplete={isRegister ? 'new-password' : 'current-password'}
+                  autoComplete={isRegister ? 'off' : 'current-password'}
                   required
-                  minLength={isRegister ? MIN_REGISTRATION_PASSWORD_LENGTH : undefined}
+                  minLength={1}
                   aria-invalid={Boolean(error)}
                 />
-                {isRegister ? <FieldDescription>至少 4 个字符，无复杂度要求</FieldDescription> : null}
+                {isRegister ? <FieldDescription>1 位起，无复杂度要求</FieldDescription> : null}
               </Field>
             </FieldGroup>
 

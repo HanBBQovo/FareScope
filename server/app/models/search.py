@@ -76,6 +76,7 @@ class SearchLeg(UUIDPrimaryKeyMixin, Base):
 class Subscription(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "subscriptions"
     __table_args__ = (
+        UniqueConstraint("user_id", "id", name="uq_subscriptions_user_id_id"),
         CheckConstraint("poll_interval_seconds >= 300", name="poll_interval_minimum"),
         Index("ix_subscriptions_user_enabled", "user_id", "enabled"),
         Index("ix_subscriptions_due", "enabled", "next_due_at"),

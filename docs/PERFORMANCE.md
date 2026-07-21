@@ -386,6 +386,30 @@ Autovacuum and statistics settings are not fixed globally yet. After the large p
 high-write observation partitions independently and raise statistics targets only for columns whose
 selectivity estimates are demonstrably wrong.
 
+## Saved comparison query boundary
+
+A saved comparison contains 2-8 same-currency subscriptions and a 7, 30, or 90-day UTC trend
+window. The snapshot endpoint performs six business `SELECT` statements regardless of whether the
+view contains two or eight routes, plus `SET TRANSACTION ... REPEATABLE READ READ ONLY` and one
+transaction-timestamp query. PostgreSQL tests assert the fixed eight-statement endpoint budget for
+both limits; there is no per-route API or SQL loop.
+
+The six business reads load the owner-scoped view/items, all subscription/query/filter/leg contexts,
+latest filtered detailed fares, latest exact-date calendar prices, detailed daily analytics, and
+calendar daily analytics. Identical canonical query/filter branches are deduplicated before the
+typed `VALUES` queries and mapped back to subscriptions afterward.
+
+Detailed trends use maintained daily aggregates only for filters they can represent and fall back
+to exact raw run-minimum semantics when coverage is incomplete. Calendar trends are a separate
+track: one sample per collection run, exact departure/return dates, one-way lowest price, and
+round-trip total price only when non-null. Missing days remain missing and calendar rows do not
+become direct-flight evidence. All reads share one repeatable-read snapshot so a collection commit
+cannot split the displayed state.
+
+The fixed query count and correctness are verified locally. Comparison-specific latency on the
+large profile and production-like cold-cache hardware remains part of the unchecked large-profile
+acceptance gate; this section does not claim that evidence yet.
+
 ## Cache boundary
 
 PostgreSQL remains the source of truth. Redis is permitted for:

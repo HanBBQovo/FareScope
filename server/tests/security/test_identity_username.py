@@ -20,11 +20,11 @@ def test_invalid_usernames_are_rejected(username: str) -> None:
     with pytest.raises(ValueError):
         normalize_username(username)
     with pytest.raises(ValidationError):
-        RegisterRequest(username=username, password="a" * 4)
+        RegisterRequest(username=username, password="a")
 
 
 def test_registration_schema_has_no_email_or_display_name_fields() -> None:
     fields = set(RegisterRequest.model_fields)
     assert fields == {"username", "password"}
     with pytest.raises(ValidationError):
-        RegisterRequest(username="observer", password="a" * 4, email="contact@example.test")
+        RegisterRequest(username="observer", password="a", email="contact@example.test")

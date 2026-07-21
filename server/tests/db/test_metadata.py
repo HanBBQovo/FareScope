@@ -15,6 +15,8 @@ def test_expected_persistence_tables_are_registered() -> None:
         "calendar_price_observations",
         "collection_artifacts",
         "collection_runs",
+        "comparison_view_items",
+        "comparison_views",
         "daily_price_aggregates",
         "daily_trend_aggregate_coverage",
         "daily_trend_aggregates",
@@ -48,10 +50,37 @@ def test_user_owned_resources_and_shared_queries_are_constrained() -> None:
     }
     assert ("query_hash",) in query_unique_columns
 
-    for table_name in ("subscriptions", "notification_channels", "alert_rules", "export_jobs"):
+    for table_name in (
+        "subscriptions",
+        "notification_channels",
+        "alert_rules",
+        "export_jobs",
+        "comparison_views",
+    ):
         table = Base.metadata.tables[table_name]
         user_foreign_key = next(iter(table.c.user_id.foreign_keys))
         assert user_foreign_key.target_fullname == "users.id"
+
+
+def test_comparison_items_enforce_same_owner_in_database_metadata() -> None:
+    subscriptions = Base.metadata.tables["subscriptions"]
+    subscription_unique_columns = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in subscriptions.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert ("user_id", "id") in subscription_unique_columns
+
+    items = Base.metadata.tables["comparison_view_items"]
+    foreign_key_targets = {
+        tuple(element.target_fullname for element in constraint.elements)
+        for constraint in items.foreign_key_constraints
+    }
+    assert ("comparison_views.user_id", "comparison_views.id") in foreign_key_targets
+    assert ("subscriptions.user_id", "subscriptions.id") in foreign_key_targets
+
+    views = Base.metadata.tables["comparison_views"]
+    assert {"normalized_name", "currency", "trend_days", "version"}.issubset(views.c.keys())
 
 
 def test_security_tables_store_hashes_or_ciphertext_not_raw_secrets() -> None:

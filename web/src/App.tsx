@@ -13,6 +13,7 @@ const Login = lazy(() => import('@/pages/Login'))
 const Overview = lazy(() => import('@/pages/Overview'))
 const FareExplorer = lazy(() => import('@/pages/FareExplorer'))
 const Subscriptions = lazy(() => import('@/pages/Subscriptions'))
+const Comparisons = lazy(() => import('@/pages/Comparisons'))
 const PriceHistory = lazy(() => import('@/pages/PriceHistory'))
 const CollectionStatus = lazy(() => import('@/pages/CollectionStatus'))
 const NotificationSettings = lazy(() => import('@/pages/NotificationSettings'))
@@ -47,6 +48,7 @@ export default function App() {
                 <Route path="overview" element={<Overview />} />
                 <Route path="explore" element={<FareExplorer />} />
                 <Route path="subscriptions" element={<Subscriptions />} />
+                <Route path="comparisons" element={<Comparisons />} />
                 <Route path="history" element={<PriceHistory />} />
                 <Route path="collection" element={<CollectionStatus />} />
                 <Route path="notifications" element={<NotificationSettings />} />
